@@ -105,7 +105,7 @@ app.get('/users',
 
 app.get('/test-playground', async (req, res) => {
     try {
-        const [rows] = await playgroundDB.query('SELECT * FROM dq_employees');
+        const [rows] = await playgroundDB.query('SELECT * FROM persons');
         res.json(rows);
     } catch (error) {
         console.error(error);
