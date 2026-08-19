@@ -66,7 +66,7 @@ router.get("/users", async (req, res) => {
         u.total_points, 
         u.current_level,
         u.created_at,
-        (SELECT COUNT(*) FROM user_case_progress ucp WHERE ucp.user_id = u.user_id AND ucp.is_completed = 1) AS solved_cases,
+        (SELECT COUNT(*) FROM user_case_progress ucp WHERE ucp.user_id = u.user_id AND (ucp.status = 'solved' OR ucp.completed_at IS NOT NULL)) AS solved_cases,
         (SELECT COALESCE(current_streak, 0) FROM user_streaks us WHERE us.user_id = u.user_id LIMIT 1) AS streak
       FROM users u
       ORDER BY u.role_id ASC, u.total_points DESC, u.created_at DESC
@@ -179,7 +179,8 @@ router.get("/cases", async (req, res) => {
         c.case_id,
         c.title,
         c.description,
-        c.points_reward,
+        c.base_points,
+        c.base_points AS points_reward,
         c.is_active,
         c.difficulty_id,
         d.difficulty_name,
@@ -228,7 +229,7 @@ router.get("/rooms", async (req, res) => {
         r.room_id,
         r.room_name,
         r.room_code,
-        r.is_active,
+        1 AS is_active,
         r.created_at,
         u.full_name AS teacher_name,
         u.email AS teacher_email,
