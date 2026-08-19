@@ -31,7 +31,7 @@ async function sendApprovalEmail({ to, fullName, role }) {
   const roleName = role === 2 ? 'Teacher' : 'Student';
   const loginUrl = process.env.APP_URL
     ? `${process.env.APP_URL.replace(/\/$/, '')}/login`
-    : 'http://localhost:5173/login';
+    : 'https://detective-query.vercel.app/login';
 
   const mailOptions = {
     from: process.env.MAIL_FROM || `"Detective Query" <${process.env.MAIL_USER}>`,
