@@ -26,75 +26,69 @@ async function checkSubmissionCooldown(userId) {
 }
 
 async function resetPlayground(datasetId) {
-    console.log("Playground reset complete for dataset:", datasetId);
+    if (!datasetId) return;
 
-    const [datasetRows] = await systemDB.query(
-        `SELECT schema_definition, sample_data
-         FROM datasets
-         WHERE dataset_id = ?`,
-        [datasetId]
-    );
+    try {
+        const [datasetRows] = await systemDB.query(
+            `SELECT schema_definition, sample_data
+             FROM datasets
+             WHERE dataset_id = ?`,
+            [datasetId]
+        );
 
-    if (datasetRows.length === 0) {
-        throw new Error('Dataset not found.');
-    }
+        if (datasetRows.length === 0) {
+            console.warn(`Dataset #${datasetId} not found in database.`);
+            return;
+        }
 
-    const schemaSQL = datasetRows[0].schema_definition;
-    const sampleDataSQL = datasetRows[0].sample_data;
+        const schemaSQL = datasetRows[0].schema_definition;
+        const sampleDataSQL = datasetRows[0].sample_data;
 
-    console.log("SCHEMA SQL:");
-    console.log(schemaSQL);
+        if (!schemaSQL) return;
 
-    console.log("SAMPLE DATA SQL:");
-    console.log(sampleDataSQL);
+        // Disable FK checks
+        await playgroundDB.query('SET FOREIGN_KEY_CHECKS = 0');
 
-
-    if (!schemaSQL) {
-        throw new Error('Dataset schema_definition is missing.');
-    }
-
-    // 🔥 Disable FK checks
-    await playgroundDB.query('SET FOREIGN_KEY_CHECKS = 0');
-
-    // Drop all tables
-    const [tables] = await playgroundDB.query(
-        `SELECT table_name
-         FROM information_schema.tables
-         WHERE table_schema = DATABASE()`
-    );
-
-    for (const row of tables) {
-        await playgroundDB.query(`DROP TABLE IF EXISTS \`${row.table_name}\``);
-    }
-
-    // 🔥 Create tables
-    const statements = schemaSQL
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
-
-    for (const statement of statements) {
-        await playgroundDB.query(statement);
-    }
-
-    // 🔥 Insert data
-    if (sampleDataSQL && sampleDataSQL.trim() !== '') {
-        const insertStatements = sampleDataSQL
+        // Execute schema statements
+        const statements = schemaSQL
             .split(';')
             .map(s => s.trim())
             .filter(s => s.length > 0);
 
-        for (const statement of insertStatements) {
-            await playgroundDB.query(statement);
+        for (const statement of statements) {
+            try {
+                await playgroundDB.query(statement);
+            } catch (err) {
+                console.warn("Schema execution warning:", err.message);
+            }
         }
-    }
 
-    // 🔥 Re-enable FK checks AFTER everything
-    await playgroundDB.query('SET FOREIGN_KEY_CHECKS = 1');
+        // Insert sample data
+        if (sampleDataSQL && sampleDataSQL.trim() !== '') {
+            const insertStatements = sampleDataSQL
+                .split(';')
+                .map(s => s.trim())
+                .filter(s => s.length > 0);
+
+            for (const statement of insertStatements) {
+                try {
+                    await playgroundDB.query(statement);
+                } catch (err) {
+                    console.warn("Sample data insertion warning:", err.message);
+                }
+            }
+        }
+
+        // Re-enable FK checks
+        await playgroundDB.query('SET FOREIGN_KEY_CHECKS = 1');
+    } catch (error) {
+        console.error("resetPlayground error:", error);
+    }
 }
 
 async function updateUserProgress(connection, userId, caseId, score, isCorrect) {
 
+    // Only run if student got it correct OR we explicitly want to save progress
     if (!isCorrect) return null;
 
     const [existing] = await connection.query(
@@ -109,29 +103,29 @@ async function updateUserProgress(connection, userId, caseId, score, isCorrect) 
         previousScore = existing[0].highest_score || 0;
     }
 
-    if (score <= previousScore) {
-        return null;
-    }
-
-    const pointsToAdd = score - previousScore;
-
+    // Always update/insert progress
     await connection.query(
         `INSERT INTO user_case_progress
-         (user_id, case_id, status, highest_score, completed_at)
-         VALUES (?, ?, 'Completed', ?, NOW())
+         (user_id, case_id, status, highest_score, is_unlocked, completed_at)
+         VALUES (?, ?, 'Completed', ?, 1, NOW())
          ON DUPLICATE KEY UPDATE
             status = 'Completed',
             highest_score = GREATEST(highest_score, VALUES(highest_score)),
+            is_unlocked = 1,
             completed_at = NOW()`,
         [userId, caseId, score]
     );
 
-    await connection.query(
-        `UPDATE users
-         SET total_points = COALESCE(total_points, 0) + ?
-         WHERE user_id = ?`,
-        [pointsToAdd, userId]
-    );
+    // Only award XP if the student beats their previous high score
+    if (score > previousScore) {
+        const pointsToAdd = score - previousScore;
+        await connection.query(
+            `UPDATE users
+             SET total_points = COALESCE(total_points, 0) + ?
+             WHERE user_id = ?`,
+            [pointsToAdd, userId]
+        );
+    }
 
     const [userData] = await connection.query(
         `SELECT total_points FROM users WHERE user_id = ?`,
@@ -145,7 +139,7 @@ async function updateUserProgress(connection, userId, caseId, score, isCorrect) 
         `UPDATE users
          SET current_level = ?
          WHERE user_id = ?`,
-        [newLevel, userId]
+         [newLevel, userId]
     );
 
     return {
@@ -274,7 +268,7 @@ async function getUnlockedDifficulties(userId) {
             `SELECT COUNT(*) AS completedCount
              FROM user_case_progress
              WHERE user_id = ?
-             AND case_id IN (?) 
+             AND case_id IN (?)
              AND status = 'Completed'`,
             [userId, caseIds]
         );
@@ -340,7 +334,7 @@ async function updateUserStreak(connection, userId) {
     }
 
     // 🔥 BONUS LOGIC (scales but safe)
-    bonusXP = newStreak * 5; 
+    bonusXP = newStreak * 5;
 
     await connection.query(
         `UPDATE users
@@ -355,11 +349,76 @@ async function updateUserStreak(connection, userId) {
     };
 }
 
+async function dumpPlaygroundData() {
+    const [tables] = await playgroundDB.query('SHOW TABLES');
+    const tableNames = tables.map(t => Object.values(t)[0]);
+    const dump = {};
+    for (const tableName of tableNames) {
+        const [rows] = await playgroundDB.query(`SELECT * FROM \`${tableName}\``);
+        dump[tableName] = rows.map(row => {
+            const sortedRow = {};
+            Object.keys(row).sort().forEach(key => {
+                sortedRow[key] = row[key];
+            });
+            return sortedRow;
+        }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    }
+    return dump;
+}
+
+async function dumpPlaygroundSchema() {
+    const [rows] = await playgroundDB.query(`
+        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'detective_query_playground'
+        ORDER BY TABLE_NAME, COLUMN_NAME
+    `);
+    return rows;
+}
+
+async function verifyDML(datasetId, studentQuery, correctQuery) {
+    // 1. Reset and run student query
+    await resetPlayground(datasetId);
+    await playgroundDB.query(studentQuery);
+    const studentData = await dumpPlaygroundData();
+
+    // 2. Reset and run correct query
+    await resetPlayground(datasetId);
+    await playgroundDB.query(correctQuery);
+    const correctData = await dumpPlaygroundData();
+
+    // 3. Reset playground to clean state
+    await resetPlayground(datasetId);
+
+    // 4. Compare JSON strings
+    return JSON.stringify(studentData) === JSON.stringify(correctData);
+}
+
+async function verifyDDL(datasetId, studentQuery, correctQuery) {
+    // 1. Reset and run student query
+    await resetPlayground(datasetId);
+    await playgroundDB.query(studentQuery);
+    const studentSchema = await dumpPlaygroundSchema();
+
+    // 2. Reset and run correct query
+    await resetPlayground(datasetId);
+    await playgroundDB.query(correctQuery);
+    const correctSchema = await dumpPlaygroundSchema();
+
+    // 3. Reset playground to clean state
+    await resetPlayground(datasetId);
+
+    // 4. Compare JSON strings
+    return JSON.stringify(studentSchema) === JSON.stringify(correctSchema);
+}
+
 module.exports = {
     checkSubmissionCooldown,
     resetPlayground,
     updateUserProgress,
     handleAchievements,
     getUnlockedDifficulties,
-    updateUserStreak
+    updateUserStreak,
+    verifyDML,
+    verifyDDL
 };

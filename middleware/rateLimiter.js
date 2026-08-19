@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 // 🌍 Global API rate limiter
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 300,
+    max: 3000,
     message: { error: 'Too many requests. Please try again later.' }
 });
 

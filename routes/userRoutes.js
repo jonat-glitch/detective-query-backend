@@ -2,9 +2,9 @@ const express = require('express');
 const { systemDB } = require('../db');
 const { authenticateToken, authorizeRole } = require('../middleware/auth');
 const submissionService = require('../services/submissionService');
+const bcrypt = require('bcryptjs');
 
 const router = express.Router();
-
 
 // 📚 Get cases with difficulty unlock system
 router.get('/cases',
@@ -92,7 +92,6 @@ router.get('/leaderboard',
     }
 });
 
-
 // 👤 Get Personal Rank
 router.get('/my-rank',
     authenticateToken,
@@ -130,7 +129,6 @@ router.get('/my-rank',
     }
 });
 
-
 // 🎖 Get User Achievements
 router.get('/achievements',
     authenticateToken,
@@ -163,38 +161,19 @@ router.get('/achievements',
     }
 });
 
-// 👤 Get User Profile
-router.get('/profile',
-    authenticateToken,
-    async (req, res) => {
-
-    try {
-        const userId = req.user.user_id;
-
-        const [results] = await systemDB.query(
-            `SELECT full_name, total_points, current_level
-             FROM users
-             WHERE user_id = ?`,
-            [userId]
-        );
-
-        if (results.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        res.json(results[0]);
-
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to fetch profile' });
-    }
-});
-
-// 🔐 Get current user role (for auto logout & real-time role sync)
+// NOTE: /profile is served by server.js directly (the full version with stats/achievements/streak).
+// Do NOT add a /profile route here — it would shadow the rich version.
+// 🔐 Get current user role (FAST - uses JWT first)
 router.get('/me-role',
     authenticateToken,
     async (req, res) => {
         try {
+            // 🔥 INSTANT response using JWT (no DB timeout)
+            if (req.user && req.user.role_id) {
+                return res.json({ role_id: req.user.role_id });
+            }
+
+            // Fallback to DB (rare case)
             const userId = req.user.user_id;
 
             const [rows] = await systemDB.query(
@@ -214,5 +193,72 @@ router.get('/me-role',
         }
     }
 );
+router.put('/change-name', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.user_id;
+        const { full_name } = req.body;
 
+        if (!full_name || !full_name.trim()) {
+            return res.status(400).json({ error: "Name cannot be empty" });
+        }
+
+        const [result] = await systemDB.query(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            [full_name.trim(), userId]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(400).json({ error: "No user updated" });
+        }
+
+        res.json({ success: true });
+
+    } catch (err) {
+        console.error("CHANGE NAME ERROR:", err);
+        res.status(500).json({ error: "Failed to update name" });
+    }
+});
+// 🔒 Change Password (verify old password first)
+router.put('/change-password', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.user_id;
+        const { oldPassword, newPassword } = req.body;
+
+        if (!oldPassword || !newPassword) {
+            return res.status(400).json({ error: "All fields required" });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({ error: "Password too short" });
+        }
+
+        const [rows] = await systemDB.query(
+            "SELECT password FROM users WHERE user_id = ?",
+            [userId]
+        );
+
+        if (!rows.length) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const match = await bcrypt.compare(oldPassword, rows[0].password);
+
+        if (!match) {
+            return res.status(401).json({ error: "Old password incorrect" });
+        }
+
+        const hashed = await bcrypt.hash(newPassword, 10);
+
+        await systemDB.query(
+            "UPDATE users SET password = ? WHERE user_id = ?",
+            [hashed, userId]
+        );
+
+        res.json({ success: true });
+
+    } catch (err) {
+        console.error("CHANGE PASSWORD ERROR:", err);
+        res.status(500).json({ error: "Failed to change password" });
+    }
+});
 module.exports = router;
