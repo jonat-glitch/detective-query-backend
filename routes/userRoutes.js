@@ -262,14 +262,80 @@ router.put('/change-password', authenticateToken, async (req, res) => {
     }
 });
 
+const { sendVerificationCode } = require('../services/emailService');
+
+// In-memory OTP storage for email changes: `${userId}_${email}` -> { code, expiresAt }
+const changeEmailOtpStore = new Map();
+
 // ───────────────────────────────────────────────────────────────
-// 📩 Submit Account Change Request (Section or Password)
+// 📧 Send OTP to New Email/Gmail Address for verification
+// POST /api/users/send-change-email-otp
+// ───────────────────────────────────────────────────────────────
+router.post('/send-change-email-otp', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.user_id;
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ error: "Email address is required." });
+        }
+
+        const emailLower = email.trim().toLowerCase();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(emailLower)) {
+            return res.status(400).json({ error: "Please enter a valid email address format." });
+        }
+
+        // Check if user is trying to change to their current email
+        const [userRows] = await systemDB.query("SELECT email FROM users WHERE user_id = ?", [userId]);
+        if (userRows.length > 0 && userRows[0].email.toLowerCase() === emailLower) {
+            return res.status(400).json({ error: "New email must be different from your current email address." });
+        }
+
+        // Check if another account already uses this email
+        const [existingUser] = await systemDB.query(
+            'SELECT user_id FROM users WHERE email = ? AND user_id != ?',
+            [emailLower, userId]
+        );
+        if (existingUser.length > 0) {
+            return res.status(409).json({ error: "An account with this email address already exists. Please choose a different email." });
+        }
+
+        // Generate 6-digit OTP code
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        const otpKey = `${userId}_${emailLower}`;
+        changeEmailOtpStore.set(otpKey, {
+            code,
+            expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+        });
+
+        // Send OTP via Brevo to the NEW email
+        try {
+            await sendVerificationCode({ to: emailLower, code });
+        } catch (mailErr) {
+            console.error("[Send Change Email OTP Error]:", mailErr);
+            return res.status(500).json({
+                error: `Failed to send verification email to ${emailLower}: ${mailErr.message || 'Email Delivery Error'}. Please check your Gmail address and try again.`
+            });
+        }
+
+        res.json({
+            message: `Verification code sent to ${emailLower}! Please check your inbox.`,
+            success: true
+        });
+    } catch (error) {
+        console.error("SEND CHANGE EMAIL OTP ERROR:", error);
+        res.status(500).json({ error: `Server error: ${error.message || 'Unknown error'}` });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────
+// 📩 Submit Account Change Request (Section, Password, or Email)
 // POST /api/users/request-change
 // ───────────────────────────────────────────────────────────────
 router.post('/request-change', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.user_id;
-        const { request_type, new_value, reason } = req.body;
+        const { request_type, new_value, reason, otp_code } = req.body;
 
         if (!request_type || !['change_section', 'change_password', 'change_email'].includes(request_type)) {
             return res.status(400).json({ error: "Invalid request type" });
@@ -320,6 +386,27 @@ router.post('/request-change', authenticateToken, async (req, res) => {
             if (existing.length > 0) {
                 return res.status(400).json({ error: "This email address is already in use by another account" });
             }
+
+            // Verify OTP code for new email
+            if (!otp_code || !String(otp_code).trim()) {
+                return res.status(400).json({ error: "Please enter the 6-digit verification code (OTP) sent to your new email." });
+            }
+
+            const otpKey = `${userId}_${storedNewValue}`;
+            const storedOtp = changeEmailOtpStore.get(otpKey);
+            if (!storedOtp) {
+                return res.status(400).json({ error: "No active verification code found for this email. Please click 'Send OTP' first." });
+            }
+            if (Date.now() > storedOtp.expiresAt) {
+                changeEmailOtpStore.delete(otpKey);
+                return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
+            }
+            if (storedOtp.code !== String(otp_code).trim()) {
+                return res.status(400).json({ error: "Invalid verification code. Please check your new email and enter the correct 6-digit code." });
+            }
+
+            // OTP is valid - consume it
+            changeEmailOtpStore.delete(otpKey);
             oldValue = user.email;
         }
 
