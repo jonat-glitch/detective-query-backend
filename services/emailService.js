@@ -9,6 +9,8 @@ const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 465,
   secure: true, // SSL
+  pool: true,
+  maxConnections: 3,
   auth: {
     user: process.env.MAIL_USER || 'jonathandelacruz0004@gmail.com',
     pass: (process.env.MAIL_PASS || 'rdko qgwk xgbs opda').replace(/\s+/g, ''),
