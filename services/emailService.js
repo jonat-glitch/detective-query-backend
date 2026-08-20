@@ -166,4 +166,62 @@ async function sendRejectionEmail({ to, fullName, reason }) {
   console.log(`[EmailService] Rejection email sent to ${to}`);
 }
 
-module.exports = { sendApprovalEmail, sendRejectionEmail };
+// ───────────────────────────────────────────────────────────────
+// Send email verification code (OTP) during registration
+// ───────────────────────────────────────────────────────────────
+async function sendVerificationCode({ to, code }) {
+  const mailOptions = {
+    from: process.env.MAIL_FROM || `"Detective Query" <${process.env.MAIL_USER}>`,
+    to,
+    subject: '🔐 Email Verification Code — Detective Query',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8" />
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; background: #0a1226; margin: 0; padding: 0; }
+          .wrapper { max-width: 560px; margin: 40px auto; background: #0d1a38; border-radius: 16px; overflow: hidden; border: 1px solid rgba(0,240,255,0.25); }
+          .header { background: linear-gradient(135deg, #0a1226 0%, #0d1a38 100%); padding: 36px 32px 24px; text-align: center; border-bottom: 1px solid rgba(0,240,255,0.2); }
+          .badge { display: inline-block; background: rgba(0,240,255,0.1); border: 1px solid #00f0ff; color: #00f0ff; font-size: 11px; font-weight: 700; letter-spacing: 2px; padding: 4px 12px; border-radius: 20px; margin-bottom: 16px; }
+          .logo { font-size: 26px; font-weight: 900; color: #ffffff; letter-spacing: 2px; margin: 0; }
+          .logo span { color: #00f0ff; }
+          .body { padding: 32px; text-align: center; }
+          h2 { color: #ffffff; font-size: 20px; margin: 0 0 12px; }
+          p { color: #94a3b8; line-height: 1.7; margin: 0 0 16px; font-size: 14px; }
+          .code-box { background: rgba(0,240,255,0.08); border: 2px solid rgba(0,240,255,0.4); border-radius: 14px; padding: 24px; margin: 24px auto; display: inline-block; }
+          .code { font-size: 36px; font-weight: 900; letter-spacing: 12px; color: #00f0ff; font-family: 'JetBrains Mono', 'Courier New', monospace; }
+          .expire { color: #64748b; font-size: 12px; margin-top: 8px; }
+          .footer { padding: 20px 32px; border-top: 1px solid rgba(255,255,255,0.07); text-align: center; }
+          .footer p { color: #475569; font-size: 12px; margin: 0; }
+        </style>
+      </head>
+      <body>
+        <div class="wrapper">
+          <div class="header">
+            <div class="badge">DETECTIVE QUERY</div>
+            <p class="logo">DETECTIVE <span>QUERY</span></p>
+          </div>
+          <div class="body">
+            <h2>📧 Verify Your Email</h2>
+            <p>Enter the verification code below to confirm your email address.</p>
+            <div class="code-box">
+              <div class="code">${code}</div>
+            </div>
+            <p class="expire">This code expires in <strong style="color:#e2e8f0;">5 minutes</strong></p>
+            <p>If you did not request this, please ignore this email.</p>
+          </div>
+          <div class="footer">
+            <p>This is an automated message from Detective Query. Do not reply to this email.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  };
+
+  await transporter.sendMail(mailOptions);
+  console.log(`[EmailService] Verification code sent to ${to}`);
+}
+
+module.exports = { sendApprovalEmail, sendRejectionEmail, sendVerificationCode };

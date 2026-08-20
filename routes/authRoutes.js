@@ -4,13 +4,65 @@ const jwt = require('jsonwebtoken');
 const { systemDB } = require('../db');
 const { loginLimiter } = require('../middleware/rateLimiter');
 const { authenticateToken } = require('../middleware/auth');
+const { sendVerificationCode } = require('../services/emailService');
 
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 
-// ================= REGISTER (now a pre-approval request) =================
+// In-memory OTP storage: email -> { code, expiresAt }
+const otpStore = new Map();
+
+// ================= SEND EMAIL VERIFICATION CODE (OTP) =================
+router.post('/send-otp', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ error: "Email is required." });
+        }
+
+        const emailLower = email.trim().toLowerCase();
+        if (!emailLower.endsWith('@gmail.com')) {
+            return res.status(400).json({ error: "Only valid @gmail.com email addresses are accepted." });
+        }
+
+        // Check if account already exists
+        const [existingUser] = await systemDB.query(
+            'SELECT user_id FROM users WHERE email = ?', [emailLower]
+        );
+        if (existingUser.length > 0) {
+            return res.status(409).json({ error: "An account with this Gmail already exists. Please log in." });
+        }
+
+        // Check if pending request exists
+        const [existingReq] = await systemDB.query(
+            'SELECT request_id, status FROM registration_requests WHERE email = ?', [emailLower]
+        );
+        if (existingReq.length > 0 && existingReq[0].status === 'pending') {
+            return res.status(409).json({ error: "A pending request with this Gmail already exists. Please wait for admin approval." });
+        }
+
+        // Generate 6-digit code
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStore.set(emailLower, {
+            code,
+            expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes expiry
+        });
+
+        // Send OTP via Gmail
+        await sendVerificationCode({ to: emailLower, code });
+
+        res.json({
+            message: "Verification code sent! Please check your Gmail inbox."
+        });
+    } catch (error) {
+        console.error("[Send OTP Error]:", error);
+        res.status(500).json({ error: "Failed to send verification code. Please check that your Gmail address is correct and active." });
+    }
+});
+
+// ================= REGISTER (now requires verified OTP) =================
 router.post('/register', async (req, res) => {
     try {
         const {
@@ -22,23 +74,52 @@ router.post('/register', async (req, res) => {
             password,
             role_id,
             student_id,
-            teacher_id
+            teacher_id,
+            otp_code
         } = req.body;
 
         if (!first_name || !last_name || !email || !password) {
             return res.status(400).json({ error: "Missing required fields" });
         }
 
-        // Check if email already has a pending/approved request or existing account
+        // Gmail-only enforcement
+        const emailLower = email.trim().toLowerCase();
+        if (!emailLower.endsWith('@gmail.com')) {
+            return res.status(400).json({ error: "Only @gmail.com email addresses are accepted for registration." });
+        }
+
+        // Verify OTP code
+        if (!otp_code) {
+            return res.status(400).json({ error: "Email verification code is required. Please verify your Gmail first." });
+        }
+
+        const storedOtp = otpStore.get(emailLower);
+        if (!storedOtp) {
+            return res.status(400).json({ error: "Verification code expired or not requested. Please request a new code." });
+        }
+
+        if (Date.now() > storedOtp.expiresAt) {
+            otpStore.delete(emailLower);
+            return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
+        }
+
+        if (storedOtp.code !== otp_code.trim()) {
+            return res.status(400).json({ error: "Invalid verification code. Please check your Gmail inbox." });
+        }
+
+        // OTP is valid - remove it
+        otpStore.delete(emailLower);
+
+        // Check if email already has an existing account
         const [existingUser] = await systemDB.query(
-            'SELECT user_id FROM users WHERE email = ?', [email]
+            'SELECT user_id FROM users WHERE email = ?', [emailLower]
         );
         if (existingUser.length > 0) {
             return res.status(409).json({ error: "An account with this email already exists." });
         }
 
         const [existingRequest] = await systemDB.query(
-            `SELECT request_id, status FROM registration_requests WHERE email = ?`, [email]
+            `SELECT request_id, status FROM registration_requests WHERE email = ?`, [emailLower]
         );
         if (existingRequest.length > 0) {
             const status = existingRequest[0].status;
@@ -50,7 +131,7 @@ router.post('/register', async (req, res) => {
             }
             // If rejected, delete old request and allow re-application
             await systemDB.query(
-                'DELETE FROM registration_requests WHERE email = ?', [email]
+                'DELETE FROM registration_requests WHERE email = ?', [emailLower]
             );
         }
 
@@ -63,7 +144,7 @@ router.post('/register', async (req, res) => {
             [
                 first_name,
                 last_name,
-                email,
+                emailLower,
                 hashedPassword,
                 role_id || 1,
                 sex || null,
