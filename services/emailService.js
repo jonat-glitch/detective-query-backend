@@ -1,53 +1,25 @@
 // services/emailService.js
 // Handles all email notifications for the Detective Query platform.
-// Uses Gmail SMTP via Nodemailer. Configure MAIL_USER and MAIL_PASS in .env
+// Uses Resend HTTP API (not SMTP) — works reliably on Render free tier.
+// SMTP is blocked on Render cloud; Resend uses HTTPS which is always open.
 
 require('dotenv').config();
-const dns = require('dns');
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first');
-}
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true, // SSL
-  family: 4,    // Force IPv4 (fixes ENETUNREACH on Render/Cloud hosts)
-  auth: {
-    user: process.env.MAIL_USER || 'jonathandelacruz0004@gmail.com',
-    pass: (process.env.MAIL_PASS || 'rdko qgwk xgbs opda').replace(/\s+/g, ''),
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-  tls: {
-    rejectUnauthorized: false
-  }
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ───────────────────────────────────────────────────────────────
-// Verify connection on startup (logs warning if misconfigured)
-// ───────────────────────────────────────────────────────────────
-transporter.verify((error) => {
-  if (error) {
-    console.warn('[EmailService] ⚠️  Gmail SMTP not configured or credentials invalid:', error.message);
-  } else {
-    console.log('[EmailService] ✅ Gmail SMTP ready — emails will be sent.');
-  }
-});
+// In test mode (no RESEND_API_KEY), use Resend's free test email address
+const FROM_EMAIL = process.env.MAIL_FROM_RESEND || 'Detective Query <onboarding@resend.dev>';
 
 // ───────────────────────────────────────────────────────────────
 // Send approval email to a newly approved user
 // ───────────────────────────────────────────────────────────────
 async function sendApprovalEmail({ to, fullName, role }) {
   const roleName = role === 2 ? 'Teacher' : 'Student';
-  const loginUrl = process.env.APP_URL
-    ? `${process.env.APP_URL.replace(/\/$/, '')}/login`
-    : 'https://detective-query.vercel.app/login';
+  const loginUrl = 'https://detective-query.vercel.app/login';
 
-  const mailOptions = {
-    from: process.env.MAIL_FROM || `"Detective Query" <${process.env.MAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
     to,
     subject: '✅ Access Approved — Welcome to Detective Query!',
     html: `
@@ -87,18 +59,9 @@ async function sendApprovalEmail({ to, fullName, role }) {
             <h2>Welcome aboard, ${fullName}!</h2>
             <p>Your registration request for <span class="highlight">Detective Query</span> has been reviewed and <span class="highlight" style="color:#00ff66;">approved</span> by the administrator.</p>
             <div class="info-box">
-              <div class="info-row">
-                <span class="info-label">Name</span>
-                <span class="info-value">${fullName}</span>
-              </div>
-              <div class="info-row">
-                <span class="info-label">Email</span>
-                <span class="info-value">${to}</span>
-              </div>
-              <div class="info-row" style="margin-bottom:0;">
-                <span class="info-label">Role</span>
-                <span class="info-value">${roleName}</span>
-              </div>
+              <div class="info-row"><span class="info-label">Name</span><span class="info-value">${fullName}</span></div>
+              <div class="info-row"><span class="info-label">Email</span><span class="info-value">${to}</span></div>
+              <div class="info-row" style="margin-bottom:0;"><span class="info-label">Role</span><span class="info-value">${roleName}</span></div>
             </div>
             <p>You can now log in using the email and password you registered with. Welcome to the investigation! 🔍</p>
             <a class="cta-btn" href="${loginUrl}" target="_blank" rel="noopener noreferrer">🔒 LOGIN TO DETECTIVE QUERY</a>
@@ -110,9 +73,8 @@ async function sendApprovalEmail({ to, fullName, role }) {
       </body>
       </html>
     `,
-  };
-
-  await transporter.sendMail(mailOptions);
+  });
+  if (error) throw new Error(error.message);
   console.log(`[EmailService] Approval email sent to ${to}`);
 }
 
@@ -120,8 +82,8 @@ async function sendApprovalEmail({ to, fullName, role }) {
 // Send rejection email
 // ───────────────────────────────────────────────────────────────
 async function sendRejectionEmail({ to, fullName, reason }) {
-  const mailOptions = {
-    from: process.env.MAIL_FROM || `"Detective Query" <${process.env.MAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
     to,
     subject: '❌ Access Request Update — Detective Query',
     html: `
@@ -158,12 +120,7 @@ async function sendRejectionEmail({ to, fullName, reason }) {
             <div class="status-badge">❌ REQUEST NOT APPROVED</div>
             <h2>Hello, ${fullName}</h2>
             <p>Thank you for your interest in <span class="highlight">Detective Query</span>. Unfortunately, your access request has been reviewed and was <span class="highlight" style="color:#ef4444;">not approved</span> at this time.</p>
-            ${reason ? `
-            <div class="reason-box">
-              <div class="reason-label">REASON PROVIDED</div>
-              <div class="reason-text">${reason}</div>
-            </div>
-            ` : ''}
+            ${reason ? `<div class="reason-box"><div class="reason-label">REASON PROVIDED</div><div class="reason-text">${reason}</div></div>` : ''}
             <p>If you believe this is a mistake, please contact your instructor or school administrator for assistance.</p>
           </div>
           <div class="footer">
@@ -173,9 +130,8 @@ async function sendRejectionEmail({ to, fullName, reason }) {
       </body>
       </html>
     `,
-  };
-
-  await transporter.sendMail(mailOptions);
+  });
+  if (error) throw new Error(error.message);
   console.log(`[EmailService] Rejection email sent to ${to}`);
 }
 
@@ -183,8 +139,8 @@ async function sendRejectionEmail({ to, fullName, reason }) {
 // Send email verification code (OTP) during registration
 // ───────────────────────────────────────────────────────────────
 async function sendVerificationCode({ to, code }) {
-  const mailOptions = {
-    from: process.env.MAIL_FROM || `"Detective Query" <${process.env.MAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
     to,
     subject: '🔐 Email Verification Code — Detective Query',
     html: `
@@ -221,7 +177,7 @@ async function sendVerificationCode({ to, code }) {
             <div class="code-box">
               <div class="code">${code}</div>
             </div>
-            <p class="expire">This code expires in <strong style="color:#e2e8f0;">5 minutes</strong></p>
+            <p class="expire">This code expires in <strong style="color:#e2e8f0;">10 minutes</strong></p>
             <p>If you did not request this, please ignore this email.</p>
           </div>
           <div class="footer">
@@ -231,9 +187,8 @@ async function sendVerificationCode({ to, code }) {
       </body>
       </html>
     `,
-  };
-
-  await transporter.sendMail(mailOptions);
+  });
+  if (error) throw new Error(error.message);
   console.log(`[EmailService] Verification code sent to ${to}`);
 }
 
