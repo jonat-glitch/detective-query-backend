@@ -215,11 +215,12 @@ async function sendVerificationCode({ to, code }) {
 }
 
 // ───────────────────────────────────────────────────────────────
-// Send account change approved email (Section / Password)
+// Send account change approved email (Section / Password / Email)
 // ───────────────────────────────────────────────────────────────
 async function sendAccountChangeApprovedEmail({ to, fullName, requestType, newValue }) {
   const isSection = requestType === 'change_section';
-  const typeTitle = isSection ? 'Section Change Approved' : 'Password Reset Approved';
+  const isEmail = requestType === 'change_email';
+  const typeTitle = isSection ? 'Section Change Approved' : isEmail ? 'Email Address Update Approved' : 'Password Reset Approved';
   const loginUrl = 'https://detective-query.vercel.app/login';
 
   await sendViaBrevo({
@@ -262,10 +263,22 @@ async function sendAccountChangeApprovedEmail({ to, fullName, requestType, newVa
             <h2>Hello, ${fullName}!</h2>
             <p>Your request to update your account details has been <span class="highlight" style="color:#00ff66;">approved</span> by the administrator.</p>
             <div class="info-box">
-              <div class="info-row"><span class="info-label">Account</span><span class="info-value">${to}</span></div>
-              ${isSection ? `<div class="info-row" style="margin-bottom:0;"><span class="info-label">New Section</span><span class="info-value" style="color:#00f0ff;">${newValue}</span></div>` : `<div class="info-row" style="margin-bottom:0;"><span class="info-label">Password Status</span><span class="info-value" style="color:#00ff66;">Updated Successfully</span></div>`}
+              <div class="info-row"><span class="info-label">Account Name</span><span class="info-value">${fullName}</span></div>
+              ${
+                isSection 
+                  ? `<div class="info-row" style="margin-bottom:0;"><span class="info-label">New Section</span><span class="info-value" style="color:#00f0ff;">${newValue}</span></div>` 
+                  : isEmail 
+                    ? `<div class="info-row" style="margin-bottom:0;"><span class="info-label">New Email Address</span><span class="info-value" style="color:#00f0ff;">${newValue}</span></div>`
+                    : `<div class="info-row" style="margin-bottom:0;"><span class="info-label">Password Status</span><span class="info-value" style="color:#00ff66;">Updated Successfully</span></div>`
+              }
             </div>
-            <p>${isSection ? 'Your section has been updated. You can now access your classroom rooms and tasks under your new section.' : 'Your new password is now active. Please use your new password next time you log in.'}</p>
+            <p>${
+              isSection 
+                ? 'Your section has been updated. You can now access your classroom rooms and tasks under your new section.' 
+                : isEmail
+                  ? 'Your primary email address has been updated. All future notifications and verification codes will be sent to this email. Please use your new email when logging in.'
+                  : 'Your new password is now active. Please use your new password next time you log in.'
+            }</p>
             <a class="cta-btn" href="${loginUrl}" target="_blank" rel="noopener noreferrer">🔒 GO TO DETECTIVE QUERY</a>
           </div>
           <div class="footer">
@@ -280,11 +293,12 @@ async function sendAccountChangeApprovedEmail({ to, fullName, requestType, newVa
 }
 
 // ───────────────────────────────────────────────────────────────
-// Send account change rejected email (Section / Password)
+// Send account change rejected email (Section / Password / Email)
 // ───────────────────────────────────────────────────────────────
 async function sendAccountChangeRejectedEmail({ to, fullName, requestType, reason }) {
   const isSection = requestType === 'change_section';
-  const typeTitle = isSection ? 'Section Change Request' : 'Password Reset Request';
+  const isEmail = requestType === 'change_email';
+  const typeTitle = isSection ? 'Section Change Request' : isEmail ? 'Email Address Change Request' : 'Password Reset Request';
 
   await sendViaBrevo({
     to,

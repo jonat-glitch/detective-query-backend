@@ -271,7 +271,7 @@ router.post('/request-change', authenticateToken, async (req, res) => {
         const userId = req.user.user_id;
         const { request_type, new_value, reason } = req.body;
 
-        if (!request_type || !['change_section', 'change_password'].includes(request_type)) {
+        if (!request_type || !['change_section', 'change_password', 'change_email'].includes(request_type)) {
             return res.status(400).json({ error: "Invalid request type" });
         }
 
@@ -303,6 +303,24 @@ router.post('/request-change', authenticateToken, async (req, res) => {
             oldValue = 'Current Password';
             // Hash password before saving to request table
             storedNewValue = await bcrypt.hash(storedNewValue, 10);
+        } else if (request_type === 'change_email') {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            storedNewValue = storedNewValue.toLowerCase().trim();
+            if (!emailRegex.test(storedNewValue)) {
+                return res.status(400).json({ error: "Please enter a valid email address format" });
+            }
+            if (storedNewValue === user.email.toLowerCase()) {
+                return res.status(400).json({ error: "New email must be different from your current email" });
+            }
+            // Check if email is already used by another account
+            const [existing] = await systemDB.query(
+                "SELECT user_id FROM users WHERE email = ? AND user_id != ?",
+                [storedNewValue, userId]
+            );
+            if (existing.length > 0) {
+                return res.status(400).json({ error: "This email address is already in use by another account" });
+            }
+            oldValue = user.email;
         }
 
         // Cancel/delete any existing pending request of the same type
@@ -323,7 +341,8 @@ router.post('/request-change', authenticateToken, async (req, res) => {
         try {
             const [admins] = await systemDB.query("SELECT user_id FROM users WHERE role_id = 3");
             if (admins.length > 0) {
-                const notifMsg = `${user.full_name} submitted a request to ${request_type === 'change_section' ? `change section to ${storedNewValue}` : 'reset their password'}.`;
+                const notifAction = request_type === 'change_section' ? `change section to ${storedNewValue}` : request_type === 'change_email' ? `change email to ${storedNewValue}` : 'reset their password';
+                const notifMsg = `${user.full_name} submitted a request to ${notifAction}.`;
                 const insertNotifs = admins.map(a => [a.user_id, userId, notifMsg, 0, 'announcement']);
                 await systemDB.query(
                     "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES ?",

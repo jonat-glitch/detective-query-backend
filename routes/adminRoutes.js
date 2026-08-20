@@ -597,6 +597,21 @@ router.post("/change-requests/:id/approve", async (req, res) => {
       );
       // Invalidate existing sessions
       await systemDB.query("DELETE FROM refresh_tokens WHERE user_id = ?", [r.user_id]);
+    } else if (r.request_type === 'change_email') {
+      const [existing] = await systemDB.query(
+        "SELECT user_id FROM users WHERE email = ? AND user_id != ?",
+        [r.new_value, r.user_id]
+      );
+      if (existing.length > 0) {
+        return res.status(400).json({ error: "This email address is already in use by another account" });
+      }
+      // Update email in database
+      await systemDB.query(
+        "UPDATE users SET email = ? WHERE user_id = ?",
+        [r.new_value, r.user_id]
+      );
+      // Invalidate existing sessions
+      await systemDB.query("DELETE FROM refresh_tokens WHERE user_id = ?", [r.user_id]);
     }
 
     // Mark request approved
@@ -609,7 +624,7 @@ router.post("/change-requests/:id/approve", async (req, res) => {
 
     // Notify user in-app (wrapped in try-catch so it never breaks the main flow)
     try {
-      const actionDesc = r.request_type === 'change_section' ? `section change to ${r.new_value}` : 'password reset';
+      const actionDesc = r.request_type === 'change_section' ? `section change to ${r.new_value}` : r.request_type === 'change_email' ? `email change to ${r.new_value}` : 'password reset';
       await systemDB.query(
         "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES (?, ?, ?, 0, ?)",
         [
@@ -623,16 +638,17 @@ router.post("/change-requests/:id/approve", async (req, res) => {
       console.warn('[Notification] Notice insertion warning:', notifErr.message);
     }
 
-    // Send email notification via Brevo
+    // Send email notification via Brevo to the new email address
+    const targetEmail = r.request_type === 'change_email' ? r.new_value : r.email;
     sendAccountChangeApprovedEmail({
-      to: r.email,
+      to: targetEmail,
       fullName: r.full_name,
       requestType: r.request_type,
-      newValue: r.request_type === 'change_section' ? r.new_value : 'New Password'
+      newValue: r.request_type === 'change_section' ? r.new_value : r.request_type === 'change_email' ? r.new_value : 'New Password'
     }).catch(err => console.error('[EmailService] Failed to send account change approval email:', err));
 
     res.json({
-      message: `Request approved. ${r.request_type === 'change_section' ? `Section updated to ${r.new_value}` : 'Password reset'} for ${r.full_name}.`,
+      message: `Request approved. ${r.request_type === 'change_section' ? `Section updated to ${r.new_value}` : r.request_type === 'change_email' ? `Email updated to ${r.new_value}` : 'Password reset'} for ${r.full_name}.`,
       success: true
     });
 
@@ -676,7 +692,7 @@ router.post("/change-requests/:id/reject", async (req, res) => {
 
     // Notify user in-app
     try {
-      const actionDesc = r.request_type === 'change_section' ? 'section change' : 'password reset';
+      const actionDesc = r.request_type === 'change_section' ? 'section change' : r.request_type === 'change_email' ? 'email change' : 'password reset';
       await systemDB.query(
         "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES (?, ?, ?, 0, ?)",
         [
