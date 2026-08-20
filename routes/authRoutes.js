@@ -27,7 +27,7 @@ router.post('/send-otp', async (req, res) => {
             return res.status(400).json({ error: "Only valid @gmail.com email addresses are accepted." });
         }
 
-        // Check if account already exists
+        // Check if account already exists in users or already approved
         const [existingUser] = await systemDB.query(
             'SELECT user_id FROM users WHERE email = ?', [emailLower]
         );
@@ -35,12 +35,11 @@ router.post('/send-otp', async (req, res) => {
             return res.status(409).json({ error: "An account with this Gmail already exists. Please log in." });
         }
 
-        // Check if pending request exists
-        const [existingReq] = await systemDB.query(
-            'SELECT request_id, status FROM registration_requests WHERE email = ?', [emailLower]
+        const [approvedReq] = await systemDB.query(
+            "SELECT request_id FROM registration_requests WHERE email = ? AND status = 'approved'", [emailLower]
         );
-        if (existingReq.length > 0 && existingReq[0].status === 'pending') {
-            return res.status(409).json({ error: "A pending request with this Gmail already exists. Please wait for admin approval." });
+        if (approvedReq.length > 0) {
+            return res.status(409).json({ error: "This Gmail account has already been approved. Please log in." });
         }
 
         // Generate 6-digit code
@@ -123,13 +122,10 @@ router.post('/register', async (req, res) => {
         );
         if (existingRequest.length > 0) {
             const status = existingRequest[0].status;
-            if (status === 'pending') {
-                return res.status(409).json({ error: "A pending request with this email already exists. Please wait for admin approval." });
-            }
             if (status === 'approved') {
                 return res.status(409).json({ error: "This email has already been approved. Please log in." });
             }
-            // If rejected, delete old request and allow re-application
+            // If pending or rejected, delete old record and replace with new submission
             await systemDB.query(
                 'DELETE FROM registration_requests WHERE email = ?', [emailLower]
             );
