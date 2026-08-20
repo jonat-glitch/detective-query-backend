@@ -285,16 +285,21 @@ router.post("/broadcast", async (req, res) => {
 
     // Bulk insert notifications
     const insertValues = recipients.map(u => [
-      senderId,
       u.user_id,
+      senderId,
       message.trim(),
+      0,
       notifType
     ]);
 
-    await systemDB.query(
-      `INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES ?`,
-      [insertValues]
-    );
+    try {
+      await systemDB.query(
+        `INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES ?`,
+        [insertValues]
+      );
+    } catch (notifErr) {
+      console.warn('[Broadcast] Notice insertion warning:', notifErr.message);
+    }
 
     res.json({
       message: `Broadcast successfully sent to ${recipients.length} user(s).`,
@@ -482,15 +487,19 @@ router.put("/users/:id/section", async (req, res) => {
     );
 
     // Notify user
-    await systemDB.query(
-      "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES (?, ?, ?, ?)",
-      [
-        req.user.user_id,
-        userId,
-        `Your section was updated to ${formattedSection || 'Unassigned'} by Administrator.`,
-        'account_update'
-      ]
-    );
+    try {
+      await systemDB.query(
+        "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES (?, ?, ?, 0, ?)",
+        [
+          userId,
+          req.user?.user_id || 1,
+          `Your section was updated to ${formattedSection || 'Unassigned'} by Administrator.`,
+          'announcement'
+        ]
+      );
+    } catch (notifErr) {
+      console.warn('[Notification] Notice insertion warning:', notifErr.message);
+    }
 
     res.json({
       message: `Section updated to ${formattedSection || 'Unassigned'} for ${userRows[0].full_name}.`,
@@ -598,17 +607,21 @@ router.post("/change-requests/:id/approve", async (req, res) => {
       [requestId]
     );
 
-    // Notify user in-app
-    const actionDesc = r.request_type === 'change_section' ? `section change to ${r.new_value}` : 'password reset';
-    await systemDB.query(
-      "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES (?, ?, ?, ?)",
-      [
-        req.user.user_id,
-        r.user_id,
-        `Your request for ${actionDesc} has been APPROVED by the administrator.`,
-        'account_update'
-      ]
-    );
+    // Notify user in-app (wrapped in try-catch so it never breaks the main flow)
+    try {
+      const actionDesc = r.request_type === 'change_section' ? `section change to ${r.new_value}` : 'password reset';
+      await systemDB.query(
+        "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES (?, ?, ?, 0, ?)",
+        [
+          r.user_id,
+          req.user?.user_id || 1,
+          `Your request for ${actionDesc} has been APPROVED by the administrator.`,
+          'announcement'
+        ]
+      );
+    } catch (notifErr) {
+      console.warn('[Notification] Notice insertion warning:', notifErr.message);
+    }
 
     // Send email notification via Brevo
     sendAccountChangeApprovedEmail({
@@ -625,7 +638,7 @@ router.post("/change-requests/:id/approve", async (req, res) => {
 
   } catch (error) {
     console.error("Approve change request error:", error);
-    res.status(500).json({ error: "Failed to approve change request" });
+    res.status(500).json({ error: error.message || "Failed to approve change request" });
   }
 });
 
@@ -662,16 +675,20 @@ router.post("/change-requests/:id/reject", async (req, res) => {
     );
 
     // Notify user in-app
-    const actionDesc = r.request_type === 'change_section' ? 'section change' : 'password reset';
-    await systemDB.query(
-      "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES (?, ?, ?, ?)",
-      [
-        req.user.user_id,
-        r.user_id,
-        `Your request for ${actionDesc} was not approved.${reason ? ` Reason: ${reason}` : ''}`,
-        'account_update'
-      ]
-    );
+    try {
+      const actionDesc = r.request_type === 'change_section' ? 'section change' : 'password reset';
+      await systemDB.query(
+        "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES (?, ?, ?, 0, ?)",
+        [
+          r.user_id,
+          req.user?.user_id || 1,
+          `Your request for ${actionDesc} was not approved.${reason ? ` Reason: ${reason}` : ''}`,
+          'warning'
+        ]
+      );
+    } catch (notifErr) {
+      console.warn('[Notification] Notice insertion warning:', notifErr.message);
+    }
 
     // Send email notification via Brevo
     sendAccountChangeRejectedEmail({
@@ -688,7 +705,7 @@ router.post("/change-requests/:id/reject", async (req, res) => {
 
   } catch (error) {
     console.error("Reject change request error:", error);
-    res.status(500).json({ error: "Failed to reject change request" });
+    res.status(500).json({ error: error.message || "Failed to reject change request" });
   }
 });
 

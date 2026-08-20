@@ -320,14 +320,18 @@ router.post('/request-change', authenticateToken, async (req, res) => {
         );
 
         // Notify Admins
-        const [admins] = await systemDB.query("SELECT user_id FROM users WHERE role_id = 3");
-        if (admins.length > 0) {
-            const notifMsg = `${user.full_name} submitted a request to ${request_type === 'change_section' ? `change section to ${storedNewValue}` : 'reset their password'}.`;
-            const insertNotifs = admins.map(a => [userId, a.user_id, notifMsg, 'account_request']);
-            await systemDB.query(
-                "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES ?",
-                [insertNotifs]
-            );
+        try {
+            const [admins] = await systemDB.query("SELECT user_id FROM users WHERE role_id = 3");
+            if (admins.length > 0) {
+                const notifMsg = `${user.full_name} submitted a request to ${request_type === 'change_section' ? `change section to ${storedNewValue}` : 'reset their password'}.`;
+                const insertNotifs = admins.map(a => [a.user_id, userId, notifMsg, 0, 'announcement']);
+                await systemDB.query(
+                    "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES ?",
+                    [insertNotifs]
+                );
+            }
+        } catch (notifErr) {
+            console.warn('[Notification] Notice insertion warning:', notifErr.message);
         }
 
         res.json({
