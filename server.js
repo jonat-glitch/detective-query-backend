@@ -32,6 +32,9 @@ const practiceRoutes = require('./routes/practiceRoutes');
 
 const app = express();
 
+// Enable trust proxy for Render / Cloudflare cloud reverse proxies
+app.set('trust proxy', 1);
+
 /* ================= MIDDLEWARE ================= */
 app.use(cors({
     origin: "*",
