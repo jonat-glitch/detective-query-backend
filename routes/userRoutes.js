@@ -261,4 +261,109 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         res.status(500).json({ error: "Failed to change password" });
     }
 });
+
+// ───────────────────────────────────────────────────────────────
+// 📩 Submit Account Change Request (Section or Password)
+// POST /api/users/request-change
+// ───────────────────────────────────────────────────────────────
+router.post('/request-change', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.user_id;
+        const { request_type, new_value, reason } = req.body;
+
+        if (!request_type || !['change_section', 'change_password'].includes(request_type)) {
+            return res.status(400).json({ error: "Invalid request type" });
+        }
+
+        if (!new_value || !String(new_value).trim()) {
+            return res.status(400).json({ error: "New value is required" });
+        }
+
+        // Get current user info (for old_value)
+        const [userRows] = await systemDB.query(
+            "SELECT full_name, section, email FROM users WHERE user_id = ?",
+            [userId]
+        );
+
+        if (!userRows.length) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const user = userRows[0];
+        let oldValue = null;
+        let storedNewValue = String(new_value).trim();
+
+        if (request_type === 'change_section') {
+            oldValue = user.section || 'Unassigned';
+            storedNewValue = storedNewValue.toUpperCase();
+        } else if (request_type === 'change_password') {
+            if (storedNewValue.length < 6) {
+                return res.status(400).json({ error: "Password must be at least 6 characters" });
+            }
+            oldValue = 'Current Password';
+            // Hash password before saving to request table
+            storedNewValue = await bcrypt.hash(storedNewValue, 10);
+        }
+
+        // Cancel/delete any existing pending request of the same type
+        await systemDB.query(
+            "DELETE FROM account_change_requests WHERE user_id = ? AND request_type = ? AND status = 'pending'",
+            [userId, request_type]
+        );
+
+        // Insert new request
+        await systemDB.query(
+            `INSERT INTO account_change_requests 
+             (user_id, request_type, old_value, new_value, reason, status) 
+             VALUES (?, ?, ?, ?, ?, 'pending')`,
+            [userId, request_type, oldValue, storedNewValue, reason || null]
+        );
+
+        // Notify Admins
+        const [admins] = await systemDB.query("SELECT user_id FROM users WHERE role_id = 3");
+        if (admins.length > 0) {
+            const notifMsg = `${user.full_name} submitted a request to ${request_type === 'change_section' ? `change section to ${storedNewValue}` : 'reset their password'}.`;
+            const insertNotifs = admins.map(a => [userId, a.user_id, notifMsg, 'account_request']);
+            await systemDB.query(
+                "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES ?",
+                [insertNotifs]
+            );
+        }
+
+        res.json({
+            message: "Request submitted successfully! The administrator will review your request.",
+            success: true
+        });
+
+    } catch (err) {
+        console.error("REQUEST CHANGE ERROR:", err);
+        res.status(500).json({ error: "Failed to submit request" });
+    }
+});
+
+// ───────────────────────────────────────────────────────────────
+// 📋 GET Logged-in User's Change Requests
+// GET /api/users/my-requests
+// ───────────────────────────────────────────────────────────────
+router.get('/my-requests', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.user_id;
+        const [rows] = await systemDB.query(
+            `SELECT request_id, request_type, old_value, 
+                    CASE WHEN request_type = 'change_password' THEN '••••••' ELSE new_value END AS display_new_value,
+                    reason, status, reject_reason, created_at, reviewed_at
+             FROM account_change_requests 
+             WHERE user_id = ? 
+             ORDER BY created_at DESC 
+             LIMIT 10`,
+            [userId]
+        );
+
+        res.json(rows);
+    } catch (err) {
+        console.error("FETCH MY REQUESTS ERROR:", err);
+        res.status(500).json({ error: "Failed to fetch requests" });
+    }
+});
+
 module.exports = router;

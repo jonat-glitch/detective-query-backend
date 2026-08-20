@@ -3,7 +3,12 @@ const router = express.Router();
 const { systemDB } = require("../db");
 const { authenticateToken, authorizeRole } = require("../middleware/auth");
 const bcrypt = require("bcryptjs");
-const { sendApprovalEmail, sendRejectionEmail } = require("../services/emailService");
+const {
+  sendApprovalEmail,
+  sendRejectionEmail,
+  sendAccountChangeApprovedEmail,
+  sendAccountChangeRejectedEmail
+} = require("../services/emailService");
 
 // 🔒 All routes here are ADMIN ONLY
 router.use(authenticateToken);
@@ -21,6 +26,7 @@ router.get("/stats", async (req, res) => {
     const [[pendingReqCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM registration_requests WHERE status = 'pending'");
     const [[approvedReqCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM registration_requests WHERE status = 'approved'");
     const [[rejectedReqCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM registration_requests WHERE status = 'rejected'");
+    const [[pendingChangeReqCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM account_change_requests WHERE status = 'pending'");
     const [[roomCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM rooms");
     const [[caseCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM cases");
     const [[solvedCount]] = await systemDB.query("SELECT COUNT(*) AS total FROM attempts WHERE is_correct = 1");
@@ -34,6 +40,7 @@ router.get("/stats", async (req, res) => {
       pendingRequests: pendingReqCount.total || 0,
       approvedRequests: approvedReqCount.total || 0,
       rejectedRequests: rejectedReqCount.total || 0,
+      pendingChangeRequests: pendingChangeReqCount.total || 0,
       rooms: roomCount.total || 0,
       cases: caseCount.total || 0,
       solvedAttempts: solvedCount.total || 0,
@@ -449,6 +456,254 @@ router.delete("/requests/:id", async (req, res) => {
   } catch (error) {
     console.error("Delete request error:", error);
     res.status(500).json({ error: "Failed to delete request" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// ✏️ Direct Edit User Section (Admin Direct Action)
+// PUT /api/admin/users/:id/section
+// Body: { section: string }
+// ─────────────────────────────────────────────
+router.put("/users/:id/section", async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    const { section } = req.body;
+
+    const [userRows] = await systemDB.query("SELECT full_name, email FROM users WHERE user_id = ?", [userId]);
+    if (!userRows.length) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const formattedSection = section ? String(section).trim().toUpperCase() : null;
+
+    await systemDB.query(
+      "UPDATE users SET section = ? WHERE user_id = ?",
+      [formattedSection, userId]
+    );
+
+    // Notify user
+    await systemDB.query(
+      "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES (?, ?, ?, ?)",
+      [
+        req.user.user_id,
+        userId,
+        `Your section was updated to ${formattedSection || 'Unassigned'} by Administrator.`,
+        'account_update'
+      ]
+    );
+
+    res.json({
+      message: `Section updated to ${formattedSection || 'Unassigned'} for ${userRows[0].full_name}.`,
+      success: true
+    });
+  } catch (error) {
+    console.error("Admin update section error:", error);
+    res.status(500).json({ error: "Failed to update section" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 📥 GET All Account Change Requests (Section & Password)
+// GET /api/admin/change-requests?status=pending|approved|rejected
+// ─────────────────────────────────────────────
+router.get("/change-requests", async (req, res) => {
+  try {
+    const { status } = req.query;
+    let query = `
+      SELECT 
+        acr.request_id,
+        acr.user_id,
+        acr.request_type,
+        acr.old_value,
+        CASE 
+          WHEN acr.request_type = 'change_password' THEN '•••••• (Encrypted)'
+          ELSE acr.new_value 
+        END AS new_value,
+        acr.reason,
+        acr.status,
+        acr.reject_reason,
+        acr.created_at,
+        acr.reviewed_at,
+        u.first_name,
+        u.last_name,
+        u.full_name,
+        u.email,
+        u.role_id,
+        u.student_id,
+        u.teacher_id,
+        u.section AS current_user_section
+      FROM account_change_requests acr
+      JOIN users u ON acr.user_id = u.user_id
+    `;
+    const params = [];
+
+    if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+      query += ' WHERE acr.status = ?';
+      params.push(status);
+    }
+
+    query += ' ORDER BY acr.created_at DESC';
+
+    const [rows] = await systemDB.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error("Fetch change requests error:", error);
+    res.status(500).json({ error: "Failed to fetch change requests" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// ✅ APPROVE an Account Change Request
+// POST /api/admin/change-requests/:id/approve
+// ─────────────────────────────────────────────
+router.post("/change-requests/:id/approve", async (req, res) => {
+  const requestId = Number(req.params.id);
+
+  try {
+    const [rows] = await systemDB.query(
+      `SELECT acr.*, u.full_name, u.email, u.role_id 
+       FROM account_change_requests acr
+       JOIN users u ON acr.user_id = u.user_id
+       WHERE acr.request_id = ? AND acr.status = 'pending'`,
+      [requestId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Pending change request not found" });
+    }
+
+    const r = rows[0];
+
+    if (r.request_type === 'change_section') {
+      // Update section in database
+      await systemDB.query(
+        "UPDATE users SET section = ? WHERE user_id = ?",
+        [r.new_value, r.user_id]
+      );
+    } else if (r.request_type === 'change_password') {
+      // Update password hash in database
+      await systemDB.query(
+        "UPDATE users SET password = ? WHERE user_id = ?",
+        [r.new_value, r.user_id]
+      );
+      // Invalidate existing sessions
+      await systemDB.query("DELETE FROM refresh_tokens WHERE user_id = ?", [r.user_id]);
+    }
+
+    // Mark request approved
+    await systemDB.query(
+      `UPDATE account_change_requests 
+       SET status = 'approved', reviewed_at = NOW() 
+       WHERE request_id = ?`,
+      [requestId]
+    );
+
+    // Notify user in-app
+    const actionDesc = r.request_type === 'change_section' ? `section change to ${r.new_value}` : 'password reset';
+    await systemDB.query(
+      "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES (?, ?, ?, ?)",
+      [
+        req.user.user_id,
+        r.user_id,
+        `Your request for ${actionDesc} has been APPROVED by the administrator.`,
+        'account_update'
+      ]
+    );
+
+    // Send email notification via Brevo
+    sendAccountChangeApprovedEmail({
+      to: r.email,
+      fullName: r.full_name,
+      requestType: r.request_type,
+      newValue: r.request_type === 'change_section' ? r.new_value : 'New Password'
+    }).catch(err => console.error('[EmailService] Failed to send account change approval email:', err));
+
+    res.json({
+      message: `Request approved. ${r.request_type === 'change_section' ? `Section updated to ${r.new_value}` : 'Password reset'} for ${r.full_name}.`,
+      success: true
+    });
+
+  } catch (error) {
+    console.error("Approve change request error:", error);
+    res.status(500).json({ error: "Failed to approve change request" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// ❌ REJECT an Account Change Request
+// POST /api/admin/change-requests/:id/reject
+// Body: { reason?: string }
+// ─────────────────────────────────────────────
+router.post("/change-requests/:id/reject", async (req, res) => {
+  const requestId = Number(req.params.id);
+  const { reason } = req.body || {};
+
+  try {
+    const [rows] = await systemDB.query(
+      `SELECT acr.*, u.full_name, u.email 
+       FROM account_change_requests acr
+       JOIN users u ON acr.user_id = u.user_id
+       WHERE acr.request_id = ? AND acr.status = 'pending'`,
+      [requestId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Pending change request not found" });
+    }
+
+    const r = rows[0];
+
+    // Mark request rejected
+    await systemDB.query(
+      `UPDATE account_change_requests 
+       SET status = 'rejected', reject_reason = ?, reviewed_at = NOW() 
+       WHERE request_id = ?`,
+      [reason || null, requestId]
+    );
+
+    // Notify user in-app
+    const actionDesc = r.request_type === 'change_section' ? 'section change' : 'password reset';
+    await systemDB.query(
+      "INSERT INTO notifications (sender_id, recipient_id, message, notification_type) VALUES (?, ?, ?, ?)",
+      [
+        req.user.user_id,
+        r.user_id,
+        `Your request for ${actionDesc} was not approved.${reason ? ` Reason: ${reason}` : ''}`,
+        'account_update'
+      ]
+    );
+
+    // Send email notification via Brevo
+    sendAccountChangeRejectedEmail({
+      to: r.email,
+      fullName: r.full_name,
+      requestType: r.request_type,
+      reason: reason || null
+    }).catch(err => console.error('[EmailService] Failed to send account change rejection email:', err));
+
+    res.json({
+      message: `Request rejected for ${r.full_name}.`,
+      success: true
+    });
+
+  } catch (error) {
+    console.error("Reject change request error:", error);
+    res.status(500).json({ error: "Failed to reject change request" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🗑️ DELETE an Account Change Request
+// DELETE /api/admin/change-requests/:id
+// ─────────────────────────────────────────────
+router.delete("/change-requests/:id", async (req, res) => {
+  try {
+    const requestId = Number(req.params.id);
+    await systemDB.query("DELETE FROM account_change_requests WHERE request_id = ?", [requestId]);
+    res.json({ message: "Change request deleted." });
+  } catch (error) {
+    console.error("Delete change request error:", error);
+    res.status(500).json({ error: "Failed to delete change request" });
   }
 });
 
