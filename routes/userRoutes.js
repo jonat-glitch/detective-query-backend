@@ -6,6 +6,11 @@ const bcrypt = require('bcryptjs');
 
 const router = express.Router();
 
+// Auto-ensure account_change_requests supports all request types (VARCHAR(50))
+systemDB.query("ALTER TABLE account_change_requests MODIFY COLUMN request_type VARCHAR(50) NOT NULL")
+  .then(() => console.log("✅ account_change_requests table verified (VARCHAR(50))"))
+  .catch(() => {});
+
 // 📚 Get cases with difficulty unlock system
 router.get('/cases',
     authenticateToken,
@@ -447,7 +452,7 @@ router.post('/request-change', authenticateToken, async (req, res) => {
 
     } catch (err) {
         console.error("REQUEST CHANGE ERROR:", err);
-        res.status(500).json({ error: "Failed to submit request" });
+        res.status(500).json({ error: err.message || "Failed to submit request" });
     }
 });
 
