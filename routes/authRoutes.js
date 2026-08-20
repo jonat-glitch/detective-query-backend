@@ -58,7 +58,7 @@ router.post('/send-otp', async (req, res) => {
         });
     } catch (error) {
         console.error("[Send OTP Error]:", error);
-        res.status(500).json({ error: "Failed to send verification code. Please check that your Gmail address is correct and active." });
+        res.status(500).json({ error: `Failed to send email (${error.message || 'SMTP Error'}). Please check your Gmail address or try again.` });
     }
 });
 
