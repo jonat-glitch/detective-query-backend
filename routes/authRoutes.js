@@ -50,14 +50,21 @@ router.post('/send-otp', async (req, res) => {
         });
 
         // Send OTP via Gmail
-        await sendVerificationCode({ to: emailLower, code });
+        try {
+            await sendVerificationCode({ to: emailLower, code });
+        } catch (mailErr) {
+            console.error("[Send OTP Mail Error]:", mailErr);
+            return res.status(500).json({
+                error: `Failed to send email to ${emailLower}: ${mailErr.message || 'SMTP Error'}. Please check your Gmail address or try again.`
+            });
+        }
 
         res.json({
             message: "Verification code sent! Please check your Gmail inbox."
         });
     } catch (error) {
         console.error("[Send OTP Error]:", error);
-        res.status(500).json({ error: `Failed to send email (${error.message || 'SMTP Error'}). Please check your Gmail address or try again.` });
+        res.status(500).json({ error: `Server error: ${error.message || 'Unknown error'}` });
     }
 });
 
