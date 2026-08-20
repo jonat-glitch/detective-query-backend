@@ -3,17 +3,24 @@
 // Uses Gmail SMTP via Nodemailer. Configure MAIL_USER and MAIL_PASS in .env
 
 require('dotenv').config();
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true, // SSL
+  family: 4,    // Force IPv4 (fixes ENETUNREACH on Render/Cloud hosts)
   auth: {
     user: process.env.MAIL_USER || 'jonathandelacruz0004@gmail.com',
     pass: (process.env.MAIL_PASS || 'rdko qgwk xgbs opda').replace(/\s+/g, ''),
   },
-  connectionTimeout: 8000,
-  greetingTimeout: 8000,
-  socketTimeout: 10000,
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 15000,
   tls: {
     rejectUnauthorized: false
   }
