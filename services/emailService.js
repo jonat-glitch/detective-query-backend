@@ -1,15 +1,43 @@
 // services/emailService.js
-// Handles all email notifications for the Detective Query platform.
-// Uses Resend HTTP API (not SMTP) — works reliably on Render free tier.
-// SMTP is blocked on Render cloud; Resend uses HTTPS which is always open.
+// Handles all email notifications for Detective Query using Brevo HTTP REST API.
+// Uses HTTPS (port 443) — 100% reliable on cloud hosts like Render with zero SMTP blocks.
 
 require('dotenv').config();
-const { Resend } = require('resend');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const SENDER = {
+  name: 'Detective Query',
+  email: process.env.MAIL_USER || 'jonathandelacruz0004@gmail.com'
+};
 
-// In test mode (no RESEND_API_KEY), use Resend's free test email address
-const FROM_EMAIL = process.env.MAIL_FROM_RESEND || 'Detective Query <onboarding@resend.dev>';
+/**
+ * Generic helper to send email via Brevo REST API
+ */
+async function sendViaBrevo({ to, subject, htmlContent }) {
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': BREVO_API_KEY,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      sender: SENDER,
+      to: [{ email: to }],
+      subject,
+      htmlContent
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error('[Brevo Error]:', data);
+    throw new Error(data.message || 'Failed to send email via Brevo');
+  }
+
+  return data;
+}
 
 // ───────────────────────────────────────────────────────────────
 // Send approval email to a newly approved user
@@ -18,11 +46,10 @@ async function sendApprovalEmail({ to, fullName, role }) {
   const roleName = role === 2 ? 'Teacher' : 'Student';
   const loginUrl = 'https://detective-query.vercel.app/login';
 
-  const { error } = await resend.emails.send({
-    from: FROM_EMAIL,
+  await sendViaBrevo({
     to,
     subject: '✅ Access Approved — Welcome to Detective Query!',
-    html: `
+    htmlContent: `
       <!DOCTYPE html>
       <html>
       <head>
@@ -72,9 +99,8 @@ async function sendApprovalEmail({ to, fullName, role }) {
         </div>
       </body>
       </html>
-    `,
+    `
   });
-  if (error) throw new Error(error.message);
   console.log(`[EmailService] Approval email sent to ${to}`);
 }
 
@@ -82,11 +108,10 @@ async function sendApprovalEmail({ to, fullName, role }) {
 // Send rejection email
 // ───────────────────────────────────────────────────────────────
 async function sendRejectionEmail({ to, fullName, reason }) {
-  const { error } = await resend.emails.send({
-    from: FROM_EMAIL,
+  await sendViaBrevo({
     to,
     subject: '❌ Access Request Update — Detective Query',
-    html: `
+    htmlContent: `
       <!DOCTYPE html>
       <html>
       <head>
@@ -129,9 +154,8 @@ async function sendRejectionEmail({ to, fullName, reason }) {
         </div>
       </body>
       </html>
-    `,
+    `
   });
-  if (error) throw new Error(error.message);
   console.log(`[EmailService] Rejection email sent to ${to}`);
 }
 
@@ -139,11 +163,10 @@ async function sendRejectionEmail({ to, fullName, reason }) {
 // Send email verification code (OTP) during registration
 // ───────────────────────────────────────────────────────────────
 async function sendVerificationCode({ to, code }) {
-  const { error } = await resend.emails.send({
-    from: FROM_EMAIL,
+  await sendViaBrevo({
     to,
     subject: '🔐 Email Verification Code — Detective Query',
-    html: `
+    htmlContent: `
       <!DOCTYPE html>
       <html>
       <head>
@@ -186,9 +209,8 @@ async function sendVerificationCode({ to, code }) {
         </div>
       </body>
       </html>
-    `,
+    `
   });
-  if (error) throw new Error(error.message);
   console.log(`[EmailService] Verification code sent to ${to}`);
 }
 
