@@ -960,7 +960,7 @@ router.get('/rank/suspects/:room_id',
         const { room_id } = req.params;
         const userId = req.user.user_id;
 
-        // 🔒 Check student is approved
+        // 🔒 Check student is approved or teacher/admin
         const [member] = await systemDB.query(
           `SELECT 1 FROM room_students
            WHERE room_id = ?
@@ -970,36 +970,45 @@ router.get('/rank/suspects/:room_id',
         );
 
         if (member.length === 0) {
-          return res.status(403).json({ error: "Access denied" });
+          const [roomOwner] = await systemDB.query(
+            `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+            [room_id, userId]
+          );
+          if (roomOwner.length === 0 && req.user.role_id !== 3) {
+            return res.status(403).json({ error: "Access denied" });
+          }
         }
 
-        // 🔥 Get active session + dataset
+        // 🔥 Get active or latest game session + dataset
         const [sessions] = await systemDB.query(
           `SELECT gs.session_id, c.dataset_id
            FROM game_sessions gs
            JOIN cases c ON gs.case_id = c.case_id
            WHERE gs.room_id = ?
-           AND gs.status = 'Active'
+           ORDER BY (gs.status = 'Active' OR LOWER(gs.status) = 'active') DESC, gs.session_id DESC
            LIMIT 1`,
           [room_id]
         );
 
         if (sessions.length === 0) {
-          return res.status(404).json({ error: "No active game" });
+          return res.status(404).json({ error: "No game session found" });
         }
 
         const session = sessions[0];
    
         // Reset playground to correct dataset
-        try {
+        if (session.dataset_id) {
+          try {
             await submissionService.resetPlayground(session.dataset_id);
-        } catch (err) {
+          } catch (err) {
             console.warn("Playground reset warning:", err.message);
+          }
         }
   
         // 👤 Fetch suspects with multiple schema fallbacks
         let suspects = [];
         const queries = [
+            `SELECT person_id, name, role FROM persons`,
             `SELECT person_id, name FROM persons`,
             `SELECT id AS person_id, name FROM persons`,
             `SELECT id AS person_id, name FROM person`,
