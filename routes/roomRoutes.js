@@ -193,19 +193,19 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
             u.full_name AS teacher_name,
 
             CASE
-              WHEN gs.status = 'Active' AND gs.end_time <= NOW() THEN 'ended'
-              WHEN gs.status IS NOT NULL THEN LOWER(gs.status)
+              WHEN MAX(gs.status) = 'Active' AND MAX(gs.end_time) <= NOW() THEN 'ended'
+              WHEN MAX(gs.status) IS NOT NULL THEN LOWER(MAX(gs.status))
               ELSE 'scheduled'
             END AS status,
 
-            gs.difficulty_id AS difficulty,
+            MAX(gs.difficulty_id) AS difficulty,
 
             -- ✅ REAL TIME LEFT (in minutes)
             CASE
-                WHEN gs.status = 'Active' AND gs.end_time > NOW() THEN
+                WHEN MAX(gs.status) = 'Active' AND MAX(gs.end_time) > NOW() THEN
                     GREATEST(
-                        gs.personal_time_limit -
-                        TIMESTAMPDIFF(MINUTE, gs.start_time, NOW()),
+                        MAX(gs.personal_time_limit) -
+                        TIMESTAMPDIFF(MINUTE, MAX(gs.start_time), NOW()),
                         0
                     )
                 ELSE NULL
@@ -228,7 +228,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
             ON rs.room_id = r.room_id
             AND rs.status = 'Approved'
 
-        GROUP BY r.room_id;
+        GROUP BY r.room_id, r.room_name, r.room_code, u.full_name;
         `);
 
         res.json({ rooms });
@@ -239,6 +239,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
       }
     }
 );
+
 
 router.get('/requests/:room_id',
     authenticateToken,
