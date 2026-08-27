@@ -156,6 +156,16 @@ router.delete("/users/:id", async (req, res) => {
       return res.status(400).json({ error: "You cannot delete your own admin account" });
     }
 
+    // Fetch user details first (for email-based cleanups)
+    const [[targetUser]] = await systemDB.query(
+      "SELECT user_id, email, student_id, teacher_id FROM users WHERE user_id = ?",
+      [userId]
+    );
+
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
     // 1. Clean up user tokens & change requests
     await systemDB.query("DELETE FROM refresh_tokens WHERE user_id = ?", [userId]);
     await systemDB.query("DELETE FROM account_change_requests WHERE user_id = ?", [userId]);
@@ -172,8 +182,10 @@ router.delete("/users/:id", async (req, res) => {
     // 3. Clean up notifications (both received and sent)
     await systemDB.query("DELETE FROM notifications WHERE user_id = ? OR sender_id = ?", [userId, userId]);
 
-    // 4. Clean up any registration requests tied to this ID
-    await systemDB.query("DELETE FROM registration_requests WHERE student_id = ? OR teacher_id = ?", [userId, userId]);
+    // 4. Clean up any registration requests tied to this user's email
+    if (targetUser.email) {
+      await systemDB.query("DELETE FROM registration_requests WHERE email = ?", [targetUser.email.toLowerCase().trim()]);
+    }
 
     // 5. If user is a teacher, clean up their rooms and game sessions
     const [teacherRooms] = await systemDB.query("SELECT room_id FROM rooms WHERE teacher_id = ?", [userId]);
