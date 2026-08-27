@@ -156,22 +156,41 @@ router.delete("/users/:id", async (req, res) => {
       return res.status(400).json({ error: "You cannot delete your own admin account" });
     }
 
-    // Clean up related records
+    // 1. Clean up user tokens & change requests
     await systemDB.query("DELETE FROM refresh_tokens WHERE user_id = ?", [userId]);
+    await systemDB.query("DELETE FROM account_change_requests WHERE user_id = ?", [userId]);
+
+    // 2. Clean up gameplay progress, notes, and achievements
     await systemDB.query("DELETE FROM user_streaks WHERE user_id = ?", [userId]);
     await systemDB.query("DELETE FROM user_case_progress WHERE user_id = ?", [userId]);
     await systemDB.query("DELETE FROM user_achievements WHERE user_id = ?", [userId]);
-    await systemDB.query("DELETE FROM room_students WHERE student_id = ?", [userId]);
+    await systemDB.query("DELETE FROM case_notes WHERE user_id = ?", [userId]);
     await systemDB.query("DELETE FROM attempts WHERE user_id = ?", [userId]);
-    await systemDB.query("DELETE FROM notifications WHERE recipient_id = ?", [userId]);
+    await systemDB.query("DELETE FROM session_objectives WHERE user_id = ?", [userId]);
+    await systemDB.query("DELETE FROM room_students WHERE student_id = ?", [userId]);
 
-    // Finally delete user
+    // 3. Clean up notifications (both received and sent)
+    await systemDB.query("DELETE FROM notifications WHERE user_id = ? OR sender_id = ?", [userId, userId]);
+
+    // 4. Clean up any registration requests tied to this ID
+    await systemDB.query("DELETE FROM registration_requests WHERE student_id = ? OR teacher_id = ?", [userId, userId]);
+
+    // 5. If user is a teacher, clean up their rooms and game sessions
+    const [teacherRooms] = await systemDB.query("SELECT room_id FROM rooms WHERE teacher_id = ?", [userId]);
+    if (teacherRooms.length > 0) {
+      const roomIds = teacherRooms.map(r => r.room_id);
+      await systemDB.query("DELETE FROM room_students WHERE room_id IN (?)", [roomIds]);
+      await systemDB.query("DELETE FROM game_sessions WHERE room_id IN (?)", [roomIds]);
+      await systemDB.query("DELETE FROM rooms WHERE teacher_id = ?", [userId]);
+    }
+
+    // 6. Finally delete user
     await systemDB.query("DELETE FROM users WHERE user_id = ?", [userId]);
 
     res.json({ message: "User deleted successfully" });
   } catch (error) {
     console.error("Delete user error:", error);
-    res.status(500).json({ error: "Failed to delete user" });
+    res.status(500).json({ error: error.message || "Failed to delete user" });
   }
 });
 
