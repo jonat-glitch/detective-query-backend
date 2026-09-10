@@ -632,12 +632,12 @@ router.get('/leaderboard/:room_id',
                 }
             }
 
-            // 🔥 Get active session
+            // 🔥 Get active session (or latest session if completed)
             const [activeSession] = await systemDB.query(
                 `SELECT session_id
                 FROM game_sessions
                 WHERE room_id = ?
-                AND status = 'Active'
+                ORDER BY (status = 'Active') DESC, session_id DESC
                 LIMIT 1`,
                 [room_id]
             );
@@ -652,25 +652,37 @@ router.get('/leaderboard/:room_id',
                 `SELECT
                     u.user_id,
                     u.full_name,
-                    COALESCE(SUM(a.score_awarded),0) AS total_score,
-                    COUNT(CASE WHEN a.is_correct = 1 THEN 1 END) AS solved_cases,
-                    MIN(a.time_taken) AS best_time,
+                    CAST(COALESCE(fa.score_awarded, so.total_objective_points, 0) AS SIGNED) AS total_score,
+                    COALESCE(so.completed_objectives, 0) AS completed_objectives,
+                    CASE WHEN fa.is_correct = 1 THEN 1 ELSE 0 END AS solved_cases,
+                    MIN(CASE WHEN a.sql_query != 'START_SESSION' AND a.sql_query != 'TIME_EXPIRED' THEN a.time_taken END) AS best_time,
                     RANK() OVER (
                         ORDER BY 
-                            COALESCE(SUM(a.score_awarded),0) DESC,
-                            COUNT(CASE WHEN a.is_correct = 1 THEN 1 END) DESC,
-                            MIN(a.time_taken) ASC
+                            CAST(COALESCE(fa.score_awarded, so.total_objective_points, 0) AS SIGNED) DESC,
+                            COALESCE(so.completed_objectives, 0) DESC,
+                            CASE WHEN fa.is_correct = 1 THEN 1 ELSE 0 END DESC
                     ) AS ranking
                 FROM room_students rs
                 JOIN users u ON rs.student_id = u.user_id
+                LEFT JOIN (
+                    SELECT user_id, SUM(points_awarded) AS total_objective_points, COUNT(*) AS completed_objectives
+                    FROM session_objectives
+                    WHERE session_id = ? AND is_completed = 1
+                    GROUP BY user_id
+                ) so ON so.user_id = u.user_id
+                LEFT JOIN (
+                    SELECT a1.user_id, a1.score_awarded, a1.is_correct
+                    FROM attempts a1
+                    WHERE a1.session_id = ? AND a1.final_answer IS NOT NULL
+                ) fa ON fa.user_id = u.user_id
                 LEFT JOIN attempts a
                     ON a.user_id = u.user_id
                     AND a.session_id = ?
                     AND a.mode = 'Rank'
                 WHERE rs.room_id = ?
                 AND rs.status = 'Approved'
-                GROUP BY u.user_id`,
-                [sessionId, room_id]
+                GROUP BY u.user_id, u.full_name, fa.score_awarded, so.total_objective_points, so.completed_objectives, fa.is_correct`,
+                [sessionId, sessionId, sessionId, room_id]
             );
 
             res.json(results);
