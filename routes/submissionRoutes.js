@@ -136,6 +136,38 @@ function rowsMatch(actual, expected) {
     return JSON.stringify(a) === JSON.stringify(e);
 }
 
+// For DQL objectives: student may SELECT * (extra columns) while expected_query selects fewer columns.
+// We project student rows onto the expected column set, then compare. This allows any valid
+// SELECT that returns the correct data rows to pass, regardless of extra columns.
+function rowsMatchSubset(studentRows, expectedRows) {
+    if (!Array.isArray(studentRows) || !Array.isArray(expectedRows)) return false;
+    if (expectedRows.length === 0 || studentRows.length !== expectedRows.length) return false;
+
+    // Normalize a single row to lowercase string values
+    const normRow = (row) => {
+        const out = {};
+        Object.entries(row).forEach(([k, v]) => {
+            out[k.toLowerCase()] = v === null ? null : String(v).trim().toLowerCase();
+        });
+        return out;
+    };
+
+    const normExpected = expectedRows.map(normRow);
+    const normStudent  = studentRows.map(normRow);
+
+    // Columns that the expected_query cares about
+    const expectedKeys = Object.keys(normExpected[0] || {}).sort();
+
+    // Project both result sets onto expected columns only
+    const project = (rows) => rows.map(row => {
+        const proj = {};
+        expectedKeys.forEach(k => { proj[k] = row[k] ?? null; });
+        return JSON.stringify(proj);
+    }).sort();
+
+    return JSON.stringify(project(normStudent)) === JSON.stringify(project(normExpected));
+}
+
 async function enforceSessionTime(session, userId, room_id) {
     // Get START_SESSION marker and calculate elapsed seconds using DB NOW() to avoid timezone mismatch
     const [rows] = await systemDB.query(
@@ -1160,6 +1192,14 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
                 [session.case_id]
             );
 
+            // Count objectives already completed BEFORE this submission
+            const [prevCompleted] = await systemDB.query(
+                `SELECT COUNT(*) AS cnt FROM session_objectives
+                 WHERE session_id = ? AND user_id = ? AND is_completed = 1`,
+                [session.session_id, userId]
+            );
+            const prevCompletedCount = Number(prevCompleted[0].cnt) || 0;
+
             for (const objective of objectives) {
                 const lowerQuery = sql_query.toLowerCase();
                 let isMatch = false;
@@ -1209,7 +1249,9 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
                             }
                         }
 
-                        if (rowsMatch(compareRows, expectedResult)) {
+                        // DQL: use subset match (student may SELECT * with extra cols)
+                        // DML/DDL: use strict match
+                        if (isDql ? rowsMatchSubset(compareRows, expectedResult) : rowsMatch(compareRows, expectedResult)) {
                             isMatch = true;
                         }
                     }
@@ -1280,7 +1322,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
         const executionTime = Date.now() - startTime;
 
         const [progress] = await systemDB.query(
-            `SELECT SUM(points_awarded) AS totalPoints
+            `SELECT SUM(points_awarded) AS totalPoints, COUNT(*) AS completedCount
               FROM session_objectives
               WHERE session_id = ?
               AND user_id = ?
@@ -1288,7 +1330,8 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             [session.session_id, userId]
         );
 
-        const objectivePoints = progress[0].totalPoints || 0;
+        const objectivePoints = Number(progress[0].totalPoints) || 0;
+        const newlyCompletedCount = (Number(progress[0].completedCount) || 0) - prevCompletedCount;
 
         // Save attempt log
         await systemDB.query(
@@ -1301,6 +1344,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             rows,
             executionTime,
             objectivePoints,
+            newlyCompletedCount,
             isCorrect: overallCorrect
         });
 
