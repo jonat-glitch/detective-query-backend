@@ -116,16 +116,16 @@ async function runSetup(connection, setupSql) {
 
 function normalizeRows(rows) {
     if (!Array.isArray(rows)) return [];
-    return rows.map(row =>
-        JSON.stringify(
-            Object.fromEntries(
-                Object.entries(row).map(([k, v]) => [
-                    k.toLowerCase(),
-                    v === null ? null : String(v).trim().toLowerCase()
-                ])
-            )
-        )
-    ).sort();
+    return rows.map(row => {
+        // Sort keys alphabetically so column order (e.g. SELECT name, role vs SELECT role, name) matches properly!
+        const sortedEntries = Object.entries(row)
+            .map(([k, v]) => [
+                k.toLowerCase(),
+                v === null ? null : String(v).trim().toLowerCase()
+            ])
+            .sort((a, b) => a[0].localeCompare(b[0]));
+        return JSON.stringify(Object.fromEntries(sortedEntries));
+    }).sort();
 }
 
 function rowsMatch(actual, expected) {
@@ -137,36 +137,29 @@ function rowsMatch(actual, expected) {
 }
 
 async function enforceSessionTime(session, userId, room_id) {
-
-    // Get START_SESSION marker
-    const [startAttempt] = await systemDB.query(
-        `SELECT attempt_date FROM attempts
+    // Get START_SESSION marker and calculate elapsed seconds using DB NOW() to avoid timezone mismatch
+    const [rows] = await systemDB.query(
+        `SELECT 
+            attempt_date,
+            TIMESTAMPDIFF(SECOND, attempt_date, NOW()) AS elapsed_seconds,
+            TIMESTAMPDIFF(SECOND, NOW(), ?) AS room_remaining_seconds
+         FROM attempts
          WHERE user_id = ?
          AND session_id = ?
          AND sql_query = 'START_SESSION'
+         ORDER BY attempt_date DESC
          LIMIT 1`,
-        [userId, session.session_id]
+        [session.end_time || '2099-12-31', userId, session.session_id]
     );
 
-    if (startAttempt.length === 0) {
+    if (rows.length === 0) {
         return { allowed: false, error: "You must start the session first." };
     }
 
-    const personalStart = new Date(startAttempt[0].attempt_date);
-    const personalLimitMs = session.personal_time_limit * 60 * 1000;
-    const personalDeadline = new Date(personalStart.getTime() + personalLimitMs);
+    const { elapsed_seconds, room_remaining_seconds } = rows[0];
+    const personalLimitSeconds = (session.personal_time_limit || 60) * 60;
 
-    const globalDeadline = session.end_time
-        ? new Date(session.end_time)
-        : new Date(9999999999999);
-
-    const effectiveDeadline =
-        personalDeadline < globalDeadline
-            ? personalDeadline
-            : globalDeadline;
-
-    if (new Date() > effectiveDeadline) {
-
+    if (elapsed_seconds > personalLimitSeconds || (session.end_time && room_remaining_seconds <= 0)) {
         const [expired] = await systemDB.query(
             `SELECT 1 FROM attempts
              WHERE user_id = ?
