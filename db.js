@@ -15,7 +15,9 @@ const systemDB = mysql.createPool({
   ssl: sslConfig,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000
 }).promise();
 
 // 🔹 PLAYGROUND DATABASE
@@ -29,7 +31,9 @@ const playgroundDB = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  multipleStatements: false
+  multipleStatements: false,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000
 }).promise();
 
 console.log(`🖥️ System DB Connected (${isRemoteHost ? 'Cloud / Remote' : 'Local / XAMPP'} Config)`);
