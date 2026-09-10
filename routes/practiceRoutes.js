@@ -28,6 +28,11 @@ function validatePracticeQuery(query, sqlType) {
             return 'Only CREATE, ALTER, or DROP statements are allowed for DDL.';
         const forbidden = [/\binsert\b/i, /\bupdate\b/i, /\bdelete\b/i, /\btruncate\b/i];
         for (const p of forbidden) if (p.test(trimmed)) return 'Forbidden SQL operation for DDL.';
+    } else if (sqlType === 'DQL') {
+        if (!/^\s*(select|with)\s/i.test(trimmed))
+            return 'Only SELECT statements are allowed for DQL.';
+        const forbidden = [/\binsert\b/i, /\bupdate\b/i, /\bdelete\b/i, /\bdrop\b/i, /\balter\b/i, /\btruncate\b/i, /\bcreate\b/i];
+        for (const p of forbidden) if (p.test(trimmed)) return 'Forbidden SQL operation for DQL.';
     } else {
         return 'Invalid sql_type for practice submission.';
     }
@@ -201,22 +206,34 @@ router.post('/run', authenticateToken, authorizeRole([1]), async (req, res) => {
 
         await runSetup(connection, c.setup_sql);
 
-        try {
-            await connection.query(sql_query);
-        } catch (queryErr) {
-            return res.status(200).json({
-                preview_rows: [],
-                error: `SQL Error: ${queryErr.message}`
-            });
-        }
-
         let previewRows = [];
-        if (c.expected_result_sql) {
+        if (c.sql_type === 'DQL') {
             try {
-                const [rows] = await connection.query(c.expected_result_sql);
+                const [rows] = await connection.query(sql_query);
                 previewRows = rows;
-            } catch (e) {
-                console.warn('Preview validation query error:', e.message);
+            } catch (queryErr) {
+                return res.status(200).json({
+                    preview_rows: [],
+                    error: `SQL Error: ${queryErr.message}`
+                });
+            }
+        } else {
+            try {
+                await connection.query(sql_query);
+            } catch (queryErr) {
+                return res.status(200).json({
+                    preview_rows: [],
+                    error: `SQL Error: ${queryErr.message}`
+                });
+            }
+
+            if (c.expected_result_sql) {
+                try {
+                    const [rows] = await connection.query(c.expected_result_sql);
+                    previewRows = rows;
+                } catch (e) {
+                    console.warn('Preview validation query error:', e.message);
+                }
             }
         }
 
@@ -263,56 +280,84 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
             return res.status(400).json({ error: validationError, is_correct: false });
         }
 
-        // ── Step A: Get EXPECTED state (fresh DB → setup → correct_query → validate)
-        const dbName = await recreateStudentDatabase(userId);
-        connection = await playgroundDB.getConnection();
-        await connection.query(`USE \`${dbName}\``);
-
         let actualRows = [];
         let expectedRows = [];
         let is_correct = false;
 
-        if (c.correct_query && c.expected_result_sql) {
+        if (c.sql_type === 'DQL') {
+            const dbName = await recreateStudentDatabase(userId);
+            connection = await playgroundDB.getConnection();
+            await connection.query(`USE \`${dbName}\``);
             await runSetup(connection, c.setup_sql);
+
             try {
-                await connection.query(c.correct_query);
-                const [expRows] = await connection.query(c.expected_result_sql);
+                const [expRows] = await connection.query(c.correct_query || c.expected_result_sql);
                 expectedRows = expRows;
             } catch (e) {
                 console.warn('Expected state generation error:', e.message);
             }
-        }
 
-        // ── Step B: Get ACTUAL state (fresh DB → setup → student query → validate)
-        await recreateStudentDatabase(userId);
-        await connection.query(`USE \`${dbName}\``);
-        await runSetup(connection, c.setup_sql);
-
-        try {
-            await connection.query(sql_query);
-        } catch (queryErr) {
-            await recordAttempt(userId, case_id, sql_query, false, 0);
-            return res.status(200).json({
-                is_correct: false,
-                feedback: `❌ SQL Error: ${queryErr.message}`,
-                actual_rows: [],
-                expected_rows: expectedRows
-            });
-        }
-
-        if (c.expected_result_sql) {
             try {
-                const [actRows] = await connection.query(c.expected_result_sql);
+                const [actRows] = await connection.query(sql_query);
                 actualRows = actRows;
-            } catch (e) {
-                console.warn('Actual state validation error:', e.message);
+                is_correct = rowsMatch(actualRows, expectedRows);
+            } catch (queryErr) {
+                await recordAttempt(userId, case_id, sql_query, false, 0);
+                return res.status(200).json({
+                    is_correct: false,
+                    feedback: `❌ SQL Error: ${queryErr.message}`,
+                    actual_rows: [],
+                    expected_rows: expectedRows
+                });
+            }
+        } else {
+            // ── Step A: Get EXPECTED state (fresh DB → setup → correct_query → validate)
+            const dbName = await recreateStudentDatabase(userId);
+            connection = await playgroundDB.getConnection();
+            await connection.query(`USE \`${dbName}\``);
+
+            if (c.correct_query && c.expected_result_sql) {
+                await runSetup(connection, c.setup_sql);
+                try {
+                    await connection.query(c.correct_query);
+                    const [expRows] = await connection.query(c.expected_result_sql);
+                    expectedRows = expRows;
+                } catch (e) {
+                    console.warn('Expected state generation error:', e.message);
+                }
             }
 
-            is_correct = expectedRows.length > 0
-                ? rowsMatch(actualRows, expectedRows)
-                : true;
-        } else {
-            is_correct = true;
+            // ── Step B: Get ACTUAL state (fresh DB → setup → student query → validate)
+            await recreateStudentDatabase(userId);
+            await connection.query(`USE \`${dbName}\``);
+            await runSetup(connection, c.setup_sql);
+
+            try {
+                await connection.query(sql_query);
+            } catch (queryErr) {
+                await recordAttempt(userId, case_id, sql_query, false, 0);
+                return res.status(200).json({
+                    is_correct: false,
+                    feedback: `❌ SQL Error: ${queryErr.message}`,
+                    actual_rows: [],
+                    expected_rows: expectedRows
+                });
+            }
+
+            if (c.expected_result_sql) {
+                try {
+                    const [actRows] = await connection.query(c.expected_result_sql);
+                    actualRows = actRows;
+                } catch (e) {
+                    console.warn('Actual state validation error:', e.message);
+                }
+
+                is_correct = expectedRows.length > 0
+                    ? rowsMatch(actualRows, expectedRows)
+                    : true;
+            } else {
+                is_correct = true;
+            }
         }
 
         // ── Award XP + lock task on first correct ─────────────────────────────

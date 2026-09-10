@@ -115,6 +115,7 @@ async function runSetup(connection, setupSql) {
 }
 
 function normalizeRows(rows) {
+    if (!Array.isArray(rows)) return [];
     return rows.map(row =>
         JSON.stringify(
             Object.fromEntries(
@@ -125,6 +126,14 @@ function normalizeRows(rows) {
             )
         )
     ).sort();
+}
+
+function rowsMatch(actual, expected) {
+    if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
+    if (actual.length !== expected.length) return false;
+    const a = normalizeRows(actual);
+    const e = normalizeRows(expected);
+    return JSON.stringify(a) === JSON.stringify(e);
 }
 
 async function enforceSessionTime(session, userId, room_id) {

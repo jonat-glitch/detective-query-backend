@@ -522,6 +522,7 @@ router.get('/active/:room_id',
                     gs.end_time,
                     c.title,
                     c.description,
+                    c.objectives AS case_objectives_text,
                     c.mode
                  FROM game_sessions gs
                  JOIN cases c ON gs.case_id = c.case_id
@@ -584,6 +585,7 @@ router.get('/active/:room_id',
                 case_id: session.case_id,
                 title: session.title,
                 description: session.description,
+                case_objectives_text: session.case_objectives_text,
                 personal_time_limit: session.personal_time_limit,
                 end_time: session.end_time,
                 mode: session.mode,
@@ -748,18 +750,18 @@ router.get('/cases',
     }
 );
 
-// ─── GET practice cases for students (DML / DDL) ───────────────────────────
+// ─── GET practice cases for students (DQL / DML / DDL) ─────────────────────
 router.get('/practice-cases',
     authenticateToken,
     authorizeRole([1]),
     async (req, res) => {
         try {
             const { type } = req.query;
-            if (!type || !['DML','DDL'].includes(type)) {
-                return res.status(400).json({ error: 'type must be DML or DDL' });
+            if (!type || !['DQL','DML','DDL'].includes(type)) {
+                return res.status(400).json({ error: 'type must be DQL, DML, or DDL' });
             }
             const [cases] = await systemDB.query(
-                `SELECT c.case_id, c.title, c.description, c.difficulty_id, c.sql_type,
+                `SELECT c.case_id, c.title, c.description, c.objectives, c.base_points, c.difficulty_id, c.sql_type,
                         d.difficulty_name
                  FROM cases c
                  JOIN difficulty d ON c.difficulty_id = d.difficulty_id
