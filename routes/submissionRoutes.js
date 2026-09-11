@@ -909,50 +909,61 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
 
         const session = sessions[0];
 
-        // 2️⃣ Check if already solved this session
-        const [solved] = await systemDB.query(
-            `SELECT 1 FROM attempts
-            WHERE user_id = ?
-            AND session_id = ?
-            AND mode = 'Rank'
-            AND is_correct = 1
-            LIMIT 1`,
+        // 2️⃣ Check if already solved or submitted final verdict this session
+        const [finalAttempts] = await systemDB.query(
+            `SELECT is_correct, final_answer, score_awarded FROM attempts
+             WHERE user_id = ?
+             AND session_id = ?
+             AND mode = 'Rank'
+             AND final_answer IS NOT NULL
+             ORDER BY attempt_id DESC
+             LIMIT 1`,
             [userId, session.session_id]
         );
 
-        const alreadySolved = solved.length > 0;
+        const hasSubmittedFinal = finalAttempts.length > 0;
+        const alreadySolved = hasSubmittedFinal && Number(finalAttempts[0].is_correct) === 1;
+        const finalAnswer = hasSubmittedFinal ? finalAttempts[0].final_answer : null;
+        const finalScore = hasSubmittedFinal ? Number(finalAttempts[0].score_awarded) : 0;
 
-        // 2️⃣ Check if student started
-        const [startAttempt] = await systemDB.query(
-            `SELECT attempt_date
+        // 3️⃣ Check if student started and calculate remaining time using DB NOW()
+        const [startRows] = await systemDB.query(
+            `SELECT 
+                attempt_date,
+                TIMESTAMPDIFF(SECOND, attempt_date, NOW()) AS elapsed_seconds,
+                TIMESTAMPDIFF(SECOND, NOW(), ?) AS room_remaining_seconds
              FROM attempts
              WHERE user_id = ?
              AND session_id = ?
              AND mode = 'Rank'
              AND sql_query = 'START_SESSION'
+             ORDER BY attempt_date DESC
              LIMIT 1`,
-            [userId, session.session_id]
+            [session.end_time || '2099-12-31', userId, session.session_id]
         );
 
-        if (startAttempt.length === 0) {
+        if (startRows.length === 0) {
             return res.json({
                 hasActiveSession: true,
                 hasStarted: false,
-                alreadySolved
+                alreadySolved,
+                hasSubmittedFinal,
+                isFinished: hasSubmittedFinal,
+                finalAnswer,
+                finalScore
             });
         }
 
-        const personalStart = new Date(startAttempt[0].attempt_date);
-        const personalLimitMs = session.personal_time_limit * 60 * 1000;
-        const personalDeadline = new Date(personalStart.getTime() + personalLimitMs);
-        const globalDeadline = new Date(session.end_time);
+        const { attempt_date, elapsed_seconds, room_remaining_seconds } = startRows[0];
+        const personalStart = attempt_date;
+        const personalLimitSeconds = (session.personal_time_limit || 60) * 60;
+        const remainingPersonalSeconds = Math.max(0, personalLimitSeconds - Math.max(0, elapsed_seconds));
+        const remainingRoomSeconds = session.end_time ? Math.max(0, room_remaining_seconds) : 9999999;
+        const effectiveRemainingSeconds = Math.min(remainingPersonalSeconds, remainingRoomSeconds);
+        const isTimeExpired = effectiveRemainingSeconds <= 0;
+        const effectiveDeadline = new Date(Date.now() + effectiveRemainingSeconds * 1000);
 
-        const effectiveDeadline =
-            personalDeadline < globalDeadline
-                ? personalDeadline
-                : globalDeadline;
-
-        if (new Date() > effectiveDeadline) {
+        if (isTimeExpired) {
 
             // Check if already marked expired
             const [expired] = await systemDB.query(
@@ -972,7 +983,7 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
                     [
                         userId,
                         session.case_id,
-                        Math.floor((new Date() - personalStart) / 1000),
+                        elapsed_seconds,
                         room_id,
                         session.session_id
                     ]
@@ -984,6 +995,10 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
                 hasStarted: true,
                 expired: true,
                 alreadySolved,
+                hasSubmittedFinal,
+                isFinished: true,
+                finalAnswer,
+                finalScore,
                 personalStart,
                 effectiveDeadline,
                 session_id: session.session_id,
@@ -994,7 +1009,12 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
         return res.json({
             hasActiveSession: true,
             hasStarted: true,
+            expired: false,
             alreadySolved,
+            hasSubmittedFinal,
+            isFinished: hasSubmittedFinal,
+            finalAnswer,
+            finalScore,
             personalStart,
             effectiveDeadline,
             session_id: session.session_id,
@@ -1041,6 +1061,20 @@ router.post('/rank/preview-query', authenticateToken, async (req, res) => {
         const timeCheck = await enforceSessionTime(session, userId, room_id);
         if (!timeCheck.allowed) {
             return res.status(403).json({ error: timeCheck.error });
+        }
+
+        // Prevent querying after final submission
+        const [existingFinal] = await systemDB.query(
+            `SELECT 1 FROM attempts
+             WHERE user_id = ?
+             AND session_id = ?
+             AND final_answer IS NOT NULL
+             LIMIT 1`,
+            [userId, session.session_id]
+        );
+
+        if (existingFinal.length > 0) {
+            return res.status(400).json({ error: "Final verdict already submitted. Case session is finished." });
         }
 
         const startTime = Date.now();
@@ -1116,6 +1150,20 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
         const timeCheck = await enforceSessionTime(session, userId, room_id);
         if (!timeCheck.allowed) {
             return res.status(403).json({ error: timeCheck.error });
+        }
+
+        // Prevent running queries after final submission
+        const [existingFinal] = await systemDB.query(
+            `SELECT 1 FROM attempts
+             WHERE user_id = ?
+             AND session_id = ?
+             AND final_answer IS NOT NULL
+             LIMIT 1`,
+            [userId, session.session_id]
+        );
+
+        if (existingFinal.length > 0) {
+            return res.status(400).json({ error: "Final verdict already submitted. Case session is finished." });
         }
 
         if (!session.dataset_id) {
@@ -1248,39 +1296,14 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
                             }
                         }
 
-                        // DQL: use subset match (student may SELECT * with extra cols)
-                        // DML/DDL: use strict match
-                        if (isDql ? rowsMatchSubset(compareRows, expectedResult) : rowsMatch(compareRows, expectedResult)) {
+                        // Exact match required: SELECT * will not match an objective asking for specific columns
+                        if (rowsMatch(compareRows, expectedResult)) {
                             isMatch = true;
                         }
                     }
                 }
 
                 if (isMatch) {
-                    // Check if previous objectives are completed first
-                    const [previousObjectives] = await systemDB.query(
-                        `SELECT COUNT(*) AS remaining
-                          FROM case_objectives co
-                          LEFT JOIN session_objectives so
-                            ON co.objective_id = so.objective_id
-                            AND so.session_id = ?
-                            AND so.user_id = ?
-                            AND so.is_completed = 1
-                          WHERE co.case_id = ?
-                          AND co.objective_order < ?
-                          AND so.objective_id IS NULL`,
-                        [
-                            session.session_id,
-                            userId,
-                            session.case_id,
-                            objective.objective_order
-                        ]
-                    );
-
-                    if (previousObjectives[0].remaining > 0) {
-                        continue;
-                    }
-
                     // Check if already completed
                     const [existing] = await systemDB.query(
                         `SELECT 1 FROM session_objectives
@@ -1439,9 +1462,9 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
 
         const session = sessions[0];
 
-        const isDql = session.sql_type === 'DQL' && session.correct_suspect_id !== null;
+        const isDql = (session.sql_type || 'DQL') === 'DQL';
 
-        if (isDql && !suspect_id) {
+        if (isDql && !suspect_id && session.correct_suspect_id !== null) {
             return res.status(400).json({ error: "Suspect ID required." });
         }
 
@@ -1459,38 +1482,34 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: "Final answer already submitted." });
         }
 
-        // 3️⃣ CHECK PERSONAL + GLOBAL TIMER
-        // Get START_SESSION marker
-        const [startAttempt] = await systemDB.query(
-            `SELECT attempt_date FROM attempts
-            WHERE user_id = ?
-            AND session_id = ?
-            AND sql_query = 'START_SESSION'
-            LIMIT 1`,
-            [userId, session.session_id]
+        // 3️⃣ CHECK PERSONAL + GLOBAL TIMER USING DB NOW()
+        const [timeRows] = await systemDB.query(
+            `SELECT 
+                attempt_date,
+                TIMESTAMPDIFF(SECOND, attempt_date, NOW()) AS elapsed_seconds,
+                TIMESTAMPDIFF(SECOND, NOW(), ?) AS room_remaining_seconds
+             FROM attempts
+             WHERE user_id = ?
+             AND session_id = ?
+             AND sql_query = 'START_SESSION'
+             ORDER BY attempt_date DESC
+             LIMIT 1`,
+            [session.end_time || '2099-12-31', userId, session.session_id]
         );
 
-        if (startAttempt.length === 0) {
+        if (timeRows.length === 0) {
             return res.status(400).json({ error: "You must start the session first." });
         }
 
-        const personalStart = new Date(startAttempt[0].attempt_date);
-
-        const personalLimitMs = session.personal_time_limit * 60 * 1000;
-        const personalDeadline = new Date(personalStart.getTime() + personalLimitMs);
-
-        const globalDeadline = session.end_time
-            ? new Date(session.end_time)
-            : new Date(9999999999999); // far future fallback
-
-        // Effective deadline = earlier one
-        const effectiveDeadline =
-            personalDeadline < globalDeadline
-                ? personalDeadline
-                : globalDeadline;
+        const { elapsed_seconds, room_remaining_seconds } = timeRows[0];
+        const personalLimitSeconds = (session.personal_time_limit || 60) * 60;
+        const remainingPersonalSeconds = Math.max(0, personalLimitSeconds - Math.max(0, elapsed_seconds));
+        const remainingRoomSeconds = session.end_time ? Math.max(0, room_remaining_seconds) : 9999999;
+        const effectiveRemainingSeconds = Math.min(remainingPersonalSeconds, remainingRoomSeconds);
+        const isTimeExpired = effectiveRemainingSeconds <= 0;
 
         // 🚨 BLOCK if expired
-        if (new Date() > effectiveDeadline) {
+        if (isTimeExpired) {
 
             // Insert TIME_EXPIRED marker (only once)
             const [expired] = await systemDB.query(
@@ -1525,7 +1544,26 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
         // 🎯 Check correctness
         let isCorrect = false;
         if (isDql) {
-            isCorrect = parseInt(suspect_id) === session.correct_suspect_id;
+            if (session.correct_suspect_id !== null) {
+                isCorrect = parseInt(suspect_id) === Number(session.correct_suspect_id);
+            } else {
+                const [objs] = await systemDB.query(
+                    `SELECT COUNT(*) AS total FROM case_objectives WHERE case_id = ?`,
+                    [session.case_id]
+                );
+                const totalObjs = objs[0].total;
+
+                if (totalObjs > 0) {
+                    const [comp] = await systemDB.query(
+                        `SELECT COUNT(*) AS completed FROM session_objectives 
+                         WHERE session_id = ? AND user_id = ? AND is_completed = 1`,
+                        [session.session_id, userId]
+                    );
+                    isCorrect = comp[0].completed >= totalObjs;
+                } else {
+                    isCorrect = Boolean(suspect_id);
+                }
+            }
         } else {
             // For DML/DDL or suspectless cases: solved if all objectives completed, or if any correct attempt exists
             const [objs] = await systemDB.query(
