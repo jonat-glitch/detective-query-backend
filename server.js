@@ -15,6 +15,7 @@ const { authenticateToken, authorizeRole } = require('./middleware/auth');
 const { apiLimiter, loginLimiter } = require('./middleware/rateLimiter');
 
 const path = require('path');
+const fs = require('fs');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const submissionRoutes = require('./routes/submissionRoutes');
@@ -75,7 +76,59 @@ app.use('/api', notificationRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
 // FILE UPLOADS
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+app.use('/uploads', express.static(uploadsDir));
+
+// ── Resilient Fallbacks for Ephemeral Cloud Storage (e.g. Render redeploys/restarts) ──
+app.get('/uploads/study-material-:caseId.pdf', async (req, res, next) => {
+    try {
+        const caseId = req.params.caseId;
+        const [rows] = await systemDB.query(
+            'SELECT file_name, mime_type, file_data FROM case_study_materials WHERE case_id = ?',
+            [caseId]
+        );
+        if (rows.length > 0 && rows[0].file_data) {
+            // Write to local disk cache in background
+            const cachedPath = path.join(uploadsDir, `study-material-${caseId}.pdf`);
+            try { fs.writeFileSync(cachedPath, rows[0].file_data); } catch (e) {}
+
+            res.setHeader('Content-Type', rows[0].mime_type || 'application/pdf');
+            res.setHeader('Content-Disposition', `inline; filename="${rows[0].file_name || `study-material-${caseId}.pdf`}"`);
+            return res.send(rows[0].file_data);
+        }
+        next();
+    } catch (err) {
+        console.error('Error fetching fallback study material from TiDB:', err);
+        next();
+    }
+});
+
+app.get('/uploads/avatar-:userId.:ext', async (req, res, next) => {
+    try {
+        const userId = req.params.userId;
+        const ext = req.params.ext.toLowerCase();
+        const [rows] = await systemDB.query(
+            'SELECT file_name, mime_type, file_data FROM user_avatars WHERE user_id = ?',
+            [userId]
+        );
+        if (rows.length > 0 && rows[0].file_data) {
+            // Write to local disk cache in background
+            const cachedPath = path.join(uploadsDir, `avatar-${userId}.${ext}`);
+            try { fs.writeFileSync(cachedPath, rows[0].file_data); } catch (e) {}
+
+            res.setHeader('Content-Type', rows[0].mime_type || (ext === 'png' ? 'image/png' : 'image/jpeg'));
+            return res.send(rows[0].file_data);
+        }
+        next();
+    } catch (err) {
+        console.error('Error fetching fallback avatar from TiDB:', err);
+        next();
+    }
+});
+
 app.use('/api', uploadRoutes);
 
 // PRACTICE (DML / DDL)

@@ -566,10 +566,21 @@ router.get('/active/:room_id',
                 ]
             );
 
-            // Check study material PDF
-            const uploadsDir = path.join(__dirname, '../uploads');
-            const pdfPath = path.join(uploadsDir, `study-material-${session.case_id}.pdf`);
-            const hasMaterial = fs.existsSync(pdfPath);
+            // Check study material PDF (from TiDB persistent storage or disk)
+            let hasMaterial = false;
+            try {
+                const [matRows] = await systemDB.query(
+                    'SELECT case_id FROM case_study_materials WHERE case_id = ?',
+                    [session.case_id]
+                );
+                const uploadsDir = path.join(__dirname, '../uploads');
+                const pdfPath = path.join(uploadsDir, `study-material-${session.case_id}.pdf`);
+                hasMaterial = matRows.length > 0 || fs.existsSync(pdfPath);
+            } catch (matErr) {
+                const uploadsDir = path.join(__dirname, '../uploads');
+                const pdfPath = path.join(uploadsDir, `study-material-${session.case_id}.pdf`);
+                hasMaterial = fs.existsSync(pdfPath);
+            }
             const study_material_url = hasMaterial
                 ? `${req.protocol}://${req.get('host')}/uploads/study-material-${session.case_id}.pdf`
                 : null;
