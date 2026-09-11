@@ -73,7 +73,7 @@ router.get("/users", async (req, res) => {
         u.total_points, 
         u.current_level,
         u.created_at,
-        (SELECT COUNT(*) FROM user_case_progress ucp WHERE ucp.user_id = u.user_id AND (ucp.status = 'solved' OR ucp.completed_at IS NOT NULL)) AS solved_cases,
+        (SELECT COUNT(*) FROM user_case_progress ucp WHERE ucp.user_id = u.user_id AND (ucp.status = 'Completed' OR ucp.status = 'solved' OR ucp.completed_at IS NOT NULL)) AS solved_cases,
         (SELECT COALESCE(current_streak, 0) FROM user_streaks us WHERE us.user_id = u.user_id LIMIT 1) AS streak
       FROM users u
       ORDER BY u.role_id ASC, u.total_points DESC, u.created_at DESC
@@ -99,6 +99,9 @@ router.put("/users/:id/role", async (req, res) => {
       "UPDATE users SET role_id = ? WHERE user_id = ?",
       [role_id, userId]
     );
+
+    // Invalidate refresh tokens so user is forced to get fresh token with new role
+    await systemDB.query("DELETE FROM refresh_tokens WHERE user_id = ?", [userId]);
 
     if (req.user.user_id === userId) {
       return res.status(440).json({

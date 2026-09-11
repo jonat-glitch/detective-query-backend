@@ -91,8 +91,6 @@ async function recreateStudentDatabase(userId) {
     try {
         await systemDB.query(`DROP DATABASE IF EXISTS \`${dbName}\``);
         await systemDB.query(`CREATE DATABASE \`${dbName}\``);
-        await systemDB.query(`GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO 'sandbox_user'@'localhost'`);
-        await systemDB.query(`FLUSH PRIVILEGES`);
     } catch (err) {
         console.error(`Error recreating database ${dbName}:`, err.message);
     }
@@ -1128,6 +1126,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
         let rows = [];
         const isDql = (session.sql_type || 'DQL') === 'DQL';
         let overallCorrect = false;
+        let prevCompletedCount = 0;
 
         try {
             if (!isDql) {
@@ -1198,7 +1197,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
                  WHERE session_id = ? AND user_id = ? AND is_completed = 1`,
                 [session.session_id, userId]
             );
-            const prevCompletedCount = Number(prevCompleted[0].cnt) || 0;
+            prevCompletedCount = Number(prevCompleted[0].cnt) || 0;
 
             for (const objective of objectives) {
                 const lowerQuery = sql_query.toLowerCase();
@@ -1350,7 +1349,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
 
     } catch (error) {
         console.error("🔥 RUN QUERY ERROR:", error);
-        res.status(500).json({ error: "Run query failed" });
+        res.status(500).json({ error: "Run query failed: " + (error.message || "Unknown error") });
     }
 });
 

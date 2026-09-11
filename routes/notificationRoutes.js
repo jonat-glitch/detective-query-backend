@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { systemDB } = require("../db");
-const { authenticateToken } = require("../middleware/auth");
+const { authenticateToken, authorizeRole } = require("../middleware/auth");
 
 // ── Auto-ensure notification_type column exists in notifications table ─────────
 systemDB.query(`ALTER TABLE notifications ADD COLUMN notification_type VARCHAR(50) DEFAULT 'announcement'`)
@@ -85,7 +85,10 @@ router.get("/notifications/sent", authenticateToken, async (req, res) => {
 
 // ── GET unread count ──────────────────────────────────────────────
 router.get("/notifications/unread-count/:user_id", authenticateToken, async (req, res) => {
-  const userId = req.params.user_id;
+  const userId = Number(req.params.user_id);
+  if (userId !== req.user.user_id && req.user.role_id !== 3) {
+    return res.status(403).json({ error: "Access denied" });
+  }
   try {
     const [rows] = await systemDB.query(
       `SELECT COUNT(*) AS count FROM notifications WHERE user_id = ? AND is_read = 0`,
@@ -99,7 +102,10 @@ router.get("/notifications/unread-count/:user_id", authenticateToken, async (req
 
 // ── GET student inbox ─────────────────────────────────────────────
 router.get("/notifications/:user_id", authenticateToken, async (req, res) => {
-  const userId = req.params.user_id;
+  const userId = Number(req.params.user_id);
+  if (userId !== req.user.user_id && req.user.role_id !== 3) {
+    return res.status(403).json({ error: "Access denied" });
+  }
   try {
     let rows;
     try {
@@ -141,8 +147,8 @@ router.get("/notifications/:user_id", authenticateToken, async (req, res) => {
   }
 });
 
-// ── POST send notification (supports notification_type) ───────────
-router.post("/notifications/send", authenticateToken, async (req, res) => {
+// ── POST send notification (Teachers & Admins only) ───────────────
+router.post("/notifications/send", authenticateToken, authorizeRole([2, 3]), async (req, res) => {
   const { message, recipients, notification_type } = req.body;
   const sender_id = req.user.user_id;
   const type = notification_type || "announcement";
@@ -179,14 +185,23 @@ router.post("/notifications/send", authenticateToken, async (req, res) => {
   }
 });
 
-// ── PUT mark one notification as read ────────────────────────────
+// ── PUT mark one notification as read (owner or admin only) ───────
 router.put("/notifications/read/:id", authenticateToken, async (req, res) => {
   const id = req.params.id;
+  const userId = req.user.user_id;
+  const roleId = req.user.role_id;
   try {
-    await systemDB.query(
-      `UPDATE notifications SET is_read = 1 WHERE notification_id = ?`,
-      [id]
-    );
+    if (roleId === 3) {
+      await systemDB.query(
+        `UPDATE notifications SET is_read = 1 WHERE notification_id = ?`,
+        [id]
+      );
+    } else {
+      await systemDB.query(
+        `UPDATE notifications SET is_read = 1 WHERE notification_id = ? AND user_id = ?`,
+        [id, userId]
+      );
+    }
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -196,11 +211,18 @@ router.put("/notifications/read/:id", authenticateToken, async (req, res) => {
 
 // ── PUT mark ALL notifications as read for a user ─────────────────
 router.put("/notifications/read-all/:user_id", authenticateToken, async (req, res) => {
-  const userId = req.params.user_id;
+  const targetUserId = Number(req.params.user_id);
+  const currentUserId = req.user.user_id;
+  const currentRoleId = req.user.role_id;
+
+  if (targetUserId !== currentUserId && currentRoleId !== 3) {
+    return res.status(403).json({ error: "Unauthorized to update notifications for another user." });
+  }
+
   try {
     await systemDB.query(
       `UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0`,
-      [userId]
+      [targetUserId]
     );
     res.json({ success: true });
   } catch (err) {
@@ -209,14 +231,23 @@ router.put("/notifications/read-all/:user_id", authenticateToken, async (req, re
   }
 });
 
-// ── DELETE a notification (student dismiss) ───────────────────────
+// ── DELETE a notification (owner or admin only) ───────────────────
 router.delete("/notifications/:id", authenticateToken, async (req, res) => {
   const id = req.params.id;
+  const userId = req.user.user_id;
+  const roleId = req.user.role_id;
   try {
-    await systemDB.query(
-      `DELETE FROM notifications WHERE notification_id = ?`,
-      [id]
-    );
+    if (roleId === 3) {
+      await systemDB.query(
+        `DELETE FROM notifications WHERE notification_id = ?`,
+        [id]
+      );
+    } else {
+      await systemDB.query(
+        `DELETE FROM notifications WHERE notification_id = ? AND user_id = ?`,
+        [id, userId]
+      );
+    }
     res.json({ success: true });
   } catch (err) {
     console.error(err);

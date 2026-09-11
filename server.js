@@ -49,6 +49,7 @@ app.use(apiLimiter);
 
 // AUTH
 app.use('/api', authRoutes);
+app.use('/', authRoutes); // Compatibility: handles /refresh-token, /logout at root level if requested without /api prefix
 
 // USERS
 app.use('/api/users', userRoutes);
@@ -221,27 +222,6 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     }
 });
 
-/* ================= DQL CASES (legacy case map flow) ================= */
-app.get('/api/cases', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.user.user_id;
-        const [cases] = await systemDB.query(
-            `SELECT c.case_id, c.title, c.difficulty_id, d.difficulty_name,
-                    CASE WHEN ucp.status = 'Completed' THEN 1 ELSE 0 END AS is_completed,
-                    CASE WHEN ucp.status = 'Completed' THEN 'Unlocked' ELSE 'Unlocked' END AS status
-             FROM cases c
-             JOIN difficulty d ON c.difficulty_id = d.difficulty_id
-             LEFT JOIN user_case_progress ucp ON ucp.case_id = c.case_id AND ucp.user_id = ?
-             WHERE c.is_active = 1 AND (c.sql_type = 'DQL' OR c.sql_type IS NULL)
-             ORDER BY c.difficulty_id ASC, c.case_id ASC`,
-            [userId]
-        );
-        res.json(cases);
-    } catch (err) {
-        console.error("Cases fetch error:", err);
-        res.status(500).json({ error: "Failed to fetch cases" });
-    }
-});
 
 /* ================= ROOT ================= */
 app.get('/', (req, res) => {

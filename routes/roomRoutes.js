@@ -204,8 +204,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
             CASE
                 WHEN MAX(gs.status) = 'Active' AND MAX(gs.end_time) > NOW() THEN
                     GREATEST(
-                        MAX(gs.personal_time_limit) -
-                        TIMESTAMPDIFF(MINUTE, MAX(gs.start_time), NOW()),
+                        TIMESTAMPDIFF(MINUTE, NOW(), MAX(gs.end_time)),
                         0
                     )
                 ELSE NULL

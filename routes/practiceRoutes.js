@@ -45,8 +45,6 @@ async function recreateStudentDatabase(userId) {
     try {
         await systemDB.query(`DROP DATABASE IF EXISTS \`${dbName}\``);
         await systemDB.query(`CREATE DATABASE \`${dbName}\``);
-        await systemDB.query(`GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO 'sandbox_user'@'localhost'`);
-        await systemDB.query(`FLUSH PRIVILEGES`);
     } catch (err) {
         console.error(`Error recreating database ${dbName}:`, err.message);
     }
