@@ -21,6 +21,7 @@ const loginLimiter = rateLimit({
         const ip = req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown';
         return `${ip}_${email}`;
     },
+    validate: { keyGeneratorIpFallback: false },
     message: { error: 'Too many failed login attempts. Please wait a few minutes and try again.' }
 });
 

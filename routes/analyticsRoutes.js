@@ -447,7 +447,7 @@ router.get('/all-students', async (req, res) => {
                 if (own.length === 0) return res.status(403).json({ error: 'Not your room' });
             }
             studentQuery  = `
-                SELECT u.user_id, u.full_name, u.total_points, u.current_level
+                SELECT u.user_id, u.student_id, u.full_name, u.total_points, u.current_level
                 FROM room_students rs
                 JOIN users u ON u.user_id = rs.student_id
                 WHERE rs.room_id = ? AND rs.status = 'Approved'
@@ -456,7 +456,7 @@ router.get('/all-students', async (req, res) => {
             studentParams = [room_id];
         } else {
             studentQuery  = `
-                SELECT user_id, full_name, total_points, current_level
+                SELECT user_id, student_id, full_name, total_points, current_level
                 FROM users
                 WHERE role_id = 1
                 ORDER BY full_name ASC
@@ -485,7 +485,7 @@ router.get('/all-students', async (req, res) => {
             SELECT ucp.user_id, c.sql_type, COUNT(*) AS solved
             FROM user_case_progress ucp
             JOIN cases c ON c.case_id = ucp.case_id
-            WHERE ucp.user_id IN (?) AND ucp.status = 'Completed'
+            WHERE ucp.user_id IN (?) AND (ucp.status = 'Completed' OR ucp.status = 'solved' OR ucp.completed_at IS NOT NULL)
             GROUP BY ucp.user_id, c.sql_type
         `, [userIds]);
 
@@ -505,6 +505,7 @@ router.get('/all-students', async (req, res) => {
             const correct = Number(a.correct_attempts || 0);
             return {
                 user_id:         s.user_id,
+                student_id:      s.student_id || ('STU-' + String(s.user_id).padStart(3, '0')),
                 full_name:       s.full_name,
                 total_points:    s.total_points   || 0,
                 current_level:   s.current_level  || 1,

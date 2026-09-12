@@ -1112,21 +1112,8 @@ router.get('/session-logs/:room_id',
                 return res.status(403).json({ error: "Not your room" });
             }
 
-            // Get active session
-            const [activeSession] = await systemDB.query(
-                `SELECT session_id, case_id
-                 FROM game_sessions
-                 WHERE room_id = ?
-                 AND status = 'Active'
-                 LIMIT 1`,
-                [room_id]
-            );
-
-            if (activeSession.length === 0) {
-                return res.status(400).json({ error: "No active game session found for this room." });
-            }
-
-            const sessionId = activeSession[0].session_id;
+            // Query ALL rank attempts for this room (no active session required)
+            // This lets teachers export logs at any time, not just during live games
 
             const [results] = await systemDB.query(
                 `SELECT 
@@ -1136,35 +1123,43 @@ router.get('/session-logs/:room_id',
                     COALESCE(SUM(a.score_awarded), 0) AS total_score,
                     COUNT(CASE WHEN a.is_correct = 1 THEN 1 END) AS correct_attempts,
                     COUNT(a.attempt_id) AS total_attempts,
-                    MIN(a.time_taken) AS best_time_seconds
+                    MIN(a.time_taken) AS best_time_seconds,
+                    MAX(a.attempt_date) AS last_attempt
                  FROM room_students rs
                  JOIN users u ON rs.student_id = u.user_id
                  LEFT JOIN attempts a 
                     ON a.user_id = u.user_id 
-                    AND a.session_id = ? 
+                    AND a.room_id = ?
                     AND a.mode = 'Rank'
                  WHERE rs.room_id = ? 
                  AND rs.status = 'Approved'
-                 GROUP BY u.user_id
+                 GROUP BY u.user_id, u.student_id, u.full_name, u.email
                  ORDER BY total_score DESC, best_time_seconds ASC`,
-                [sessionId, room_id]
+                [room_id, room_id]
             );
 
+            if (req.query.format === 'json') {
+                return res.json(results);
+            }
+
             // Construct CSV
-            let csv = 'Student ID,Full Name,Email,Total Score,Correct Attempts,Total Attempts,Best Time (Seconds)\n';
+            let csv = 'Student ID,Full Name,Email,Total Score,Correct Attempts,Total Attempts,Best Time (Seconds),Last Attempt\n';
             results.forEach(row => {
                 const studentId = row.student_id || 'N/A';
-                const fullName = `"${row.full_name.replace(/"/g, '""')}"`;
-                const email = row.email;
-                const totalScore = row.total_score;
-                const correctAttempts = row.correct_attempts;
-                const totalAttempts = row.total_attempts;
+                const fullName = `"${(row.full_name || '').replace(/"/g, '""')}"`;
+                const email = row.email || '';
+                const totalScore = row.total_score || 0;
+                const correctAttempts = row.correct_attempts || 0;
+                const totalAttempts = row.total_attempts || 0;
                 const bestTime = row.best_time_seconds !== null ? row.best_time_seconds : 'N/A';
+                const lastAttempt = row.last_attempt ? new Date(row.last_attempt).toLocaleString() : 'Never';
                 
-                csv += `${studentId},${fullName},${email},${totalScore},${correctAttempts},${totalAttempts},${bestTime}\n`;
+                csv += `${studentId},${fullName},${email},${totalScore},${correctAttempts},${totalAttempts},${bestTime},"${lastAttempt}"\n`;
             });
 
-            const filename = `Room_${room_id}_Session_${sessionId}_Logs.csv`;
+            const safeRoomName = (room[0].room_name || `Room_${room_id}`).replace(/[^a-z0-9_]/gi, '_');
+            const date = new Date().toISOString().slice(0, 10);
+            const filename = `Session_Logs_${safeRoomName}_${date}.csv`;
             res.setHeader('Content-Type', 'text/csv');
             res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
             return res.status(200).send(csv);
