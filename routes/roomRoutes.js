@@ -6,6 +6,17 @@ const submissionService = require('../services/submissionService');
 const path = require('path');
 const fs = require('fs');
 
+// ── Idempotent migration: ensure pause columns exist ──────────────────────────
+(async () => {
+  try {
+    await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS is_paused TINYINT(1) NOT NULL DEFAULT 0`);
+    await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS paused_at DATETIME NULL`);
+    await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS paused_seconds INT NOT NULL DEFAULT 0`);
+  } catch (e) {
+    // Columns may already exist on some DB flavours — safe to ignore
+  }
+})();
+
 router.post('/create-room',
     authenticateToken,
     authorizeRole([2]),
@@ -470,6 +481,79 @@ router.post('/end-game/:room_id',
     }
 );
 
+// ── PAUSE GAME ────────────────────────────────────────────────────────────────
+router.post('/pause/:room_id',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) return res.status(403).json({ error: 'Not your room' });
+
+            await systemDB.query(
+                `UPDATE game_sessions
+                 SET is_paused = 1, paused_at = NOW()
+                 WHERE room_id = ? AND status = 'Active' AND is_paused = 0`,
+                [room_id]
+            );
+
+            res.json({ message: 'Game paused' });
+        } catch (error) {
+            console.error('Pause game error:', error);
+            res.status(500).json({ error: 'Failed to pause game' });
+        }
+    }
+);
+
+// ── RESUME GAME ───────────────────────────────────────────────────────────────
+router.post('/resume/:room_id',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) return res.status(403).json({ error: 'Not your room' });
+
+            // Extend end_time by the elapsed pause duration so students don't lose time
+            await systemDB.query(
+                `UPDATE game_sessions
+                 SET end_time = DATE_ADD(end_time, INTERVAL TIMESTAMPDIFF(SECOND, paused_at, NOW()) SECOND),
+                     paused_seconds = paused_seconds + TIMESTAMPDIFF(SECOND, paused_at, NOW()),
+                     is_paused = 0,
+                     paused_at = NULL
+                 WHERE room_id = ? AND status = 'Active' AND is_paused = 1`,
+                [room_id]
+            );
+
+            // Return updated end_time so teacher can sync its local timer
+            const [sessions] = await systemDB.query(
+                `SELECT end_time FROM game_sessions WHERE room_id = ? AND status = 'Active' LIMIT 1`,
+                [room_id]
+            );
+
+            res.json({
+                message: 'Game resumed',
+                end_time: sessions[0]?.end_time || null
+            });
+        } catch (error) {
+            console.error('Resume game error:', error);
+            res.status(500).json({ error: 'Failed to resume game' });
+        }
+    }
+);
+
 router.get('/active/:room_id',
     authenticateToken,
     async (req, res) => {
@@ -519,6 +603,8 @@ router.get('/active/:room_id',
                     gs.case_id,
                     gs.personal_time_limit,
                     gs.end_time,
+                    gs.is_paused,
+                    gs.paused_at,
                     c.title,
                     c.description,
                     c.objectives AS case_objectives_text,
@@ -527,7 +613,7 @@ router.get('/active/:room_id',
                  JOIN cases c ON gs.case_id = c.case_id
                  WHERE gs.room_id = ?
                  AND gs.status = 'Active'
-                 AND gs.end_time > NOW()
+                 AND (gs.end_time > NOW() OR gs.is_paused = 1)
                  LIMIT 1`,
                 [room_id]
             );
@@ -598,6 +684,8 @@ router.get('/active/:room_id',
                 case_objectives_text: session.case_objectives_text,
                 personal_time_limit: session.personal_time_limit,
                 end_time: session.end_time,
+                is_paused: session.is_paused === 1,
+                paused_at: session.paused_at,
                 mode: session.mode,
                 objectives,
                 study_material_url
