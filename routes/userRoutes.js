@@ -201,22 +201,23 @@ router.get('/me-role',
 router.put('/change-name', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.user_id;
-        const { full_name } = req.body;
+        const { full_name, first_name, last_name } = req.body;
+        const resolvedName = (full_name || `${first_name || ''} ${last_name || ''}`).trim();
 
-        if (!full_name || !full_name.trim()) {
+        if (!resolvedName) {
             return res.status(400).json({ error: "Name cannot be empty" });
         }
 
         const [result] = await systemDB.query(
-            "UPDATE users SET full_name = ? WHERE user_id = ?",
-            [full_name.trim(), userId]
+            "UPDATE users SET full_name = ?, first_name = COALESCE(?, first_name), last_name = COALESCE(?, last_name) WHERE user_id = ?",
+            [resolvedName, first_name ? first_name.trim() : null, last_name ? last_name.trim() : null, userId]
         );
 
         if (result.affectedRows === 0) {
             return res.status(400).json({ error: "No user updated" });
         }
 
-        res.json({ success: true });
+        res.json({ success: true, full_name: resolvedName });
 
     } catch (err) {
         console.error("CHANGE NAME ERROR:", err);
