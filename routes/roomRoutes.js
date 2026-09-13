@@ -6,12 +6,14 @@ const submissionService = require('../services/submissionService');
 const path = require('path');
 const fs = require('fs');
 
-// ── Idempotent migration: ensure pause columns exist ──────────────────────────
+// ── Idempotent migration: ensure pause & archive columns exist ────────────────
 (async () => {
   try {
     await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS is_paused TINYINT(1) NOT NULL DEFAULT 0`);
     await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS paused_at DATETIME NULL`);
     await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS paused_seconds INT NOT NULL DEFAULT 0`);
+    await systemDB.query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS is_archived TINYINT(1) NOT NULL DEFAULT 0`);
+    await systemDB.query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS archived_at DATETIME NULL`);
   } catch (e) {
     // Columns may already exist on some DB flavours — safe to ignore
   }
@@ -23,24 +25,58 @@ router.post('/create-room',
     async (req, res) => {
         try {
             const teacherId = req.user.user_id;
-            const { room_name } = req.body;
+            let { room_name, room_code } = req.body;
 
-            const roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+            if (!room_name || !room_name.trim()) {
+                return res.status(400).json({ error: "Room name is required" });
+            }
+            room_name = room_name.trim();
+
+            if (room_code && room_code.trim()) {
+                room_code = room_code.trim().toUpperCase();
+                if (!/^[A-Z0-9]{3,10}$/.test(room_code)) {
+                    return res.status(400).json({ error: "Room code must be 3-10 alphanumeric characters (letters and numbers only)." });
+                }
+
+                // Check if code is already in use
+                const [existing] = await systemDB.query(
+                    `SELECT room_id FROM rooms WHERE room_code = ?`,
+                    [room_code]
+                );
+                if (existing.length > 0) {
+                    return res.status(400).json({ error: "This room code is already in use. Please choose another code or generate a random one." });
+                }
+            } else {
+                // Generate a unique random code
+                let code = '';
+                let isUnique = false;
+                let attempts = 0;
+                while (!isUnique && attempts < 10) {
+                    code = Math.random().toString(36).substring(2, 8).toUpperCase();
+                    const [dup] = await systemDB.query(`SELECT 1 FROM rooms WHERE room_code = ?`, [code]);
+                    if (dup.length === 0) isUnique = true;
+                    attempts++;
+                }
+                room_code = code;
+            }
 
             const [result] = await systemDB.query(
-                `INSERT INTO rooms (teacher_id, room_name, room_code)
-                 VALUES (?, ?, ?)`,
-                [teacherId, room_name || "My Room", roomCode]
+                `INSERT INTO rooms (teacher_id, room_name, room_code, is_archived)
+                 VALUES (?, ?, ?, 0)`,
+                [teacherId, room_name, room_code]
             );
 
             res.json({
                 message: "Room created",
                 room_id: result.insertId,
-                room_code: roomCode
+                room_code: room_code
             });
 
         } catch (error) {
-            console.error(error);
+            console.error('Create room error:', error);
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(400).json({ error: "This room code is already in use. Please choose another code." });
+            }
             res.status(500).json({ error: "Failed to create room" });
         }
     }
@@ -94,7 +130,7 @@ router.post('/join-room',
             const { room_code } = req.body;
 
             const [rooms] = await systemDB.query(
-                `SELECT * FROM rooms WHERE room_code = ?`,
+                `SELECT * FROM rooms WHERE room_code = ? AND (is_archived = 0 OR is_archived IS NULL)`,
                 [room_code]
             );
 
@@ -158,14 +194,17 @@ router.get('/my-rooms',
         try {
             const userId = req.user.user_id;
             const roleId = req.user.role_id;
+            const isArchived = req.query.archived === 'true' ? 1 : 0;
 
             if (roleId === 2) {
                 // Teacher's created rooms
                 const [rooms] = await systemDB.query(
-                    `SELECT room_id, room_name, room_code
+                    `SELECT room_id, room_name, room_code, is_archived, archived_at,
+                            (SELECT COUNT(*) FROM room_students rs WHERE rs.room_id = rooms.room_id AND rs.status = 'Approved') AS student_count
                      FROM rooms
-                     WHERE teacher_id = ?`,
-                    [userId]
+                     WHERE teacher_id = ? AND (is_archived = ? OR (? = 0 AND is_archived IS NULL))
+                     ORDER BY room_id DESC`,
+                    [userId, isArchived, isArchived]
                 );
                 return res.json(rooms);
             } else {
@@ -174,7 +213,9 @@ router.get('/my-rooms',
                     `SELECT r.room_id, r.room_name, r.room_code
                      FROM room_students rs
                      JOIN rooms r ON r.room_id = rs.room_id
-                     WHERE rs.student_id = ? AND rs.status = 'Approved'`,
+                     WHERE rs.student_id = ? AND rs.status = 'Approved'
+                       AND (r.is_archived = 0 OR r.is_archived IS NULL)
+                     ORDER BY r.room_id DESC`,
                     [userId]
                 );
                 return res.json(rooms);
@@ -237,6 +278,8 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
         LEFT JOIN room_students rs
             ON rs.room_id = r.room_id
             AND rs.status = 'Approved'
+
+        WHERE (r.is_archived = 0 OR r.is_archived IS NULL)
 
         GROUP BY r.room_id, r.room_name, r.room_code, u.full_name;
         `);
@@ -550,6 +593,114 @@ router.post('/resume/:room_id',
         } catch (error) {
             console.error('Resume game error:', error);
             res.status(500).json({ error: 'Failed to resume game' });
+        }
+    }
+);
+
+// ── ARCHIVE ROOM ─────────────────────────────────────────────────────────────
+router.post('/archive/:room_id',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) return res.status(403).json({ error: 'Not your room' });
+
+            // End any active game session in this room
+            await systemDB.query(
+                `UPDATE game_sessions SET status = 'Ended', end_time = NOW()
+                 WHERE room_id = ? AND status IN ('Active', 'Paused')`,
+                [room_id]
+            );
+
+            // Mark room as archived
+            await systemDB.query(
+                `UPDATE rooms SET is_archived = 1, archived_at = NOW() WHERE room_id = ?`,
+                [room_id]
+            );
+
+            res.json({ message: 'Room archived successfully' });
+        } catch (error) {
+            console.error('Archive room error:', error);
+            res.status(500).json({ error: 'Failed to archive room' });
+        }
+    }
+);
+
+// ── RESTORE ROOM ─────────────────────────────────────────────────────────────
+router.post('/restore/:room_id',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) return res.status(403).json({ error: 'Not your room' });
+
+            await systemDB.query(
+                `UPDATE rooms SET is_archived = 0, archived_at = NULL WHERE room_id = ?`,
+                [room_id]
+            );
+
+            res.json({ message: 'Room restored successfully' });
+        } catch (error) {
+            console.error('Restore room error:', error);
+            res.status(500).json({ error: 'Failed to restore room' });
+        }
+    }
+);
+
+// ── PERMANENTLY DELETE ROOM ──────────────────────────────────────────────────
+router.delete('/permanent/:room_id',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ? AND is_archived = 1`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) {
+                return res.status(400).json({ error: 'Room must be archived first before permanent deletion' });
+            }
+
+            // Clean up child records in dependency order
+            const [sessions] = await systemDB.query(
+                `SELECT session_id FROM game_sessions WHERE room_id = ?`,
+                [room_id]
+            );
+            const sessionIds = sessions.map(s => s.session_id);
+
+            if (sessionIds.length > 0) {
+                await systemDB.query(
+                    `DELETE FROM session_objectives WHERE session_id IN (?)`,
+                    [sessionIds]
+                );
+            }
+
+            await systemDB.query(`DELETE FROM attempts WHERE room_id = ?`, [room_id]);
+            await systemDB.query(`DELETE FROM game_sessions WHERE room_id = ?`, [room_id]);
+            await systemDB.query(`DELETE FROM room_students WHERE room_id = ?`, [room_id]);
+            await systemDB.query(`DELETE FROM rooms WHERE room_id = ?`, [room_id]);
+
+            res.json({ message: 'Room permanently deleted' });
+        } catch (error) {
+            console.error('Permanent delete room error:', error);
+            res.status(500).json({ error: 'Failed to permanently delete room' });
         }
     }
 );
