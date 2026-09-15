@@ -507,9 +507,16 @@ router.post('/activate',
                 await submissionService.resetPlayground(caseData[0].dataset_id);
             }
 
+            const [newSessions] = await systemDB.query(
+                `SELECT end_time, GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), end_time)) AS remaining_seconds FROM game_sessions WHERE session_id = ?`,
+                [result.insertId]
+            );
+
             res.json({
                 message: "Game activated",
-                session_id: result.insertId
+                session_id: result.insertId,
+                end_time: newSessions[0]?.end_time || null,
+                remaining_seconds: Number(newSessions[0]?.remaining_seconds) || (duration_minutes * 60)
             });
 
         } catch (error) {
@@ -575,7 +582,17 @@ router.post('/pause/:room_id',
                 [room_id]
             );
 
-            res.json({ message: 'Game paused' });
+            const [pausedSessions] = await systemDB.query(
+                `SELECT end_time, GREATEST(0, TIMESTAMPDIFF(SECOND, paused_at, end_time)) AS remaining_seconds 
+                 FROM game_sessions WHERE room_id = ? AND status = 'Active' LIMIT 1`,
+                [room_id]
+            );
+
+            res.json({ 
+                message: 'Game paused',
+                end_time: pausedSessions[0]?.end_time || null,
+                remaining_seconds: Number(pausedSessions[0]?.remaining_seconds) || 0
+            });
         } catch (error) {
             console.error('Pause game error:', error);
             res.status(500).json({ error: 'Failed to pause game' });
@@ -609,15 +626,17 @@ router.post('/resume/:room_id',
                 [room_id]
             );
 
-            // Return updated end_time so teacher can sync its local timer
+            // Return updated end_time & remaining_seconds so teacher and students can sync
             const [sessions] = await systemDB.query(
-                `SELECT end_time FROM game_sessions WHERE room_id = ? AND status = 'Active' LIMIT 1`,
+                `SELECT end_time, GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), end_time)) AS remaining_seconds 
+                 FROM game_sessions WHERE room_id = ? AND status = 'Active' LIMIT 1`,
                 [room_id]
             );
 
             res.json({
                 message: 'Game resumed',
-                end_time: sessions[0]?.end_time || null
+                end_time: sessions[0]?.end_time || null,
+                remaining_seconds: Number(sessions[0]?.remaining_seconds) || 0
             });
         } catch (error) {
             console.error('Resume game error:', error);
@@ -785,6 +804,10 @@ router.get('/active/:room_id',
                     gs.end_time,
                     gs.is_paused,
                     gs.paused_at,
+                    CASE 
+                        WHEN gs.is_paused = 1 THEN GREATEST(0, TIMESTAMPDIFF(SECOND, gs.paused_at, gs.end_time))
+                        ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), gs.end_time))
+                    END AS remaining_seconds,
                     c.title,
                     c.description,
                     c.objectives AS case_objectives_text,
@@ -864,6 +887,7 @@ router.get('/active/:room_id',
                 case_objectives_text: session.case_objectives_text,
                 personal_time_limit: session.personal_time_limit,
                 end_time: session.end_time,
+                remaining_seconds: Math.max(0, Number(session.remaining_seconds) || 0),
                 is_paused: session.is_paused === 1,
                 paused_at: session.paused_at,
                 mode: session.mode,
