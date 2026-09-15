@@ -127,18 +127,46 @@ router.post('/join-room',
     async (req, res) => {
         try {
             const studentId = req.user.user_id;
-            const { room_code } = req.body;
+            const { room_code, room_id } = req.body;
 
-            const [rooms] = await systemDB.query(
-                `SELECT * FROM rooms WHERE room_code = ? AND (is_archived = 0 OR is_archived IS NULL)`,
-                [room_code]
-            );
-
-            if (rooms.length === 0) {
-                return res.status(404).json({ error: "Invalid room code" });
+            if (!room_code || !room_code.trim()) {
+                return res.status(400).json({ error: "Room code is required" });
             }
 
-            const room = rooms[0];
+            const cleanCode = room_code.trim().toUpperCase();
+
+            let room;
+            if (room_id) {
+                // When student joins from a specific room card, strictly validate the code against that room
+                const [targetRooms] = await systemDB.query(
+                    `SELECT * FROM rooms WHERE room_id = ? AND (is_archived = 0 OR is_archived IS NULL)`,
+                    [room_id]
+                );
+
+                if (targetRooms.length === 0) {
+                    return res.status(404).json({ error: "Room not found or no longer available" });
+                }
+
+                const targetRoom = targetRooms[0];
+                if ((targetRoom.room_code || '').trim().toUpperCase() !== cleanCode) {
+                    return res.status(400).json({
+                        error: `Invalid code for "${targetRoom.room_name}". The code you entered does not match this room.`
+                    });
+                }
+                room = targetRoom;
+            } else {
+                // Fallback if no specific room_id was provided
+                const [rooms] = await systemDB.query(
+                    `SELECT * FROM rooms WHERE UPPER(TRIM(room_code)) = ? AND (is_archived = 0 OR is_archived IS NULL)`,
+                    [cleanCode]
+                );
+
+                if (rooms.length === 0) {
+                    return res.status(404).json({ error: "Invalid room code" });
+                }
+
+                room = rooms[0];
+            }
 
             const [existing] = await systemDB.query(
                 `SELECT * FROM room_students
@@ -152,6 +180,7 @@ router.post('/join-room',
                 if (status === 'Approved') {
                   return res.json({
                     message: "Already approved",
+                    status: "Approved",
                     room_id: room.room_id
                   });
                 }
@@ -164,10 +193,10 @@ router.post('/join-room',
 
                 if (status === 'Rejected') {
                   return res.status(403).json({
-                    error: "You were rejected"
+                    error: "You were rejected from this room"
                   });
                 }
-              }
+            }
 
             await systemDB.query(
                 `INSERT INTO room_students (room_id, student_id, status)
@@ -177,6 +206,7 @@ router.post('/join-room',
 
             res.json({
                 message: "Join request sent",
+                status: "Pending",
                 room_id: room.room_id
             });
 
@@ -241,7 +271,6 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
           SELECT
             r.room_id,
             r.room_name,
-            r.room_code,
             u.full_name AS teacher_name,
 
             CASE
@@ -281,7 +310,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
 
         WHERE (r.is_archived = 0 OR r.is_archived IS NULL)
 
-        GROUP BY r.room_id, r.room_name, r.room_code, u.full_name;
+        GROUP BY r.room_id, r.room_name, u.full_name;
         `);
 
         res.json({ rooms });
