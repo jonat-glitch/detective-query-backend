@@ -129,6 +129,28 @@ router.post('/join-room',
             const studentId = req.user.user_id;
             const { room_code, room_id } = req.body;
 
+            // If room_id is provided without room_code, allow re-request if student was previously rejected
+            if ((!room_code || !room_code.trim()) && room_id) {
+                const [existing] = await systemDB.query(
+                    `SELECT * FROM room_students WHERE room_id = ? AND student_id = ?`,
+                    [room_id, studentId]
+                );
+                if (existing.length > 0 && existing[0].status === 'Rejected') {
+                    await systemDB.query(
+                        `UPDATE room_students
+                         SET status = 'Pending', requested_at = CURRENT_TIMESTAMP
+                         WHERE room_id = ? AND student_id = ?`,
+                        [room_id, studentId]
+                    );
+                    return res.json({
+                        message: "Join request re-sent",
+                        status: "Pending",
+                        room_id: Number(room_id)
+                    });
+                }
+                return res.status(400).json({ error: "Room code is required" });
+            }
+
             if (!room_code || !room_code.trim()) {
                 return res.status(400).json({ error: "Room code is required" });
             }
@@ -192,8 +214,17 @@ router.post('/join-room',
                 }
 
                 if (status === 'Rejected') {
-                  return res.status(403).json({
-                    error: "You were rejected from this room"
+                  // Allow student to re-request join
+                  await systemDB.query(
+                    `UPDATE room_students
+                     SET status = 'Pending', requested_at = CURRENT_TIMESTAMP
+                     WHERE room_id = ? AND student_id = ?`,
+                    [room.room_id, studentId]
+                  );
+                  return res.json({
+                    message: "Join request re-sent",
+                    status: "Pending",
+                    room_id: room.room_id
                   });
                 }
             }
@@ -213,6 +244,54 @@ router.post('/join-room',
         } catch (error) {
             console.error(error);
             res.status(500).json({ error: "Join request failed" });
+        }
+    }
+);
+
+// One-click re-request join for rejected students
+router.post('/:room_id/re-request',
+    authenticateToken,
+    authorizeRole([1]),
+    async (req, res) => {
+        try {
+            const studentId = req.user.user_id;
+            const { room_id } = req.params;
+
+            const [existing] = await systemDB.query(
+                `SELECT rs.*, r.room_name FROM room_students rs
+                 JOIN rooms r ON r.room_id = rs.room_id
+                 WHERE rs.room_id = ? AND rs.student_id = ?`,
+                [room_id, studentId]
+            );
+
+            if (existing.length === 0) {
+                return res.status(404).json({ error: "No join request found for this room" });
+            }
+
+            if (existing[0].status === 'Approved') {
+                return res.json({ message: "Already approved", status: "Approved", room_id: Number(room_id) });
+            }
+
+            if (existing[0].status === 'Pending') {
+                return res.json({ message: "Waiting for teacher approval", status: "Pending", room_id: Number(room_id) });
+            }
+
+            // Reset status from Rejected to Pending
+            await systemDB.query(
+                `UPDATE room_students
+                 SET status = 'Pending', requested_at = CURRENT_TIMESTAMP
+                 WHERE room_id = ? AND student_id = ?`,
+                [room_id, studentId]
+            );
+
+            res.json({
+                message: "Join request re-sent successfully",
+                status: "Pending",
+                room_id: Number(room_id)
+            });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ error: "Failed to re-request room join" });
         }
     }
 );
@@ -238,12 +317,12 @@ router.get('/my-rooms',
                 );
                 return res.json(rooms);
             } else {
-                // Student's joined & approved rooms
+                // Student's joined & approved/pending rooms
                 const [rooms] = await systemDB.query(
-                    `SELECT r.room_id, r.room_name, r.room_code
+                    `SELECT r.room_id, r.room_name, r.room_code, rs.status AS join_status
                      FROM room_students rs
                      JOIN rooms r ON r.room_id = rs.room_id
-                     WHERE rs.student_id = ? AND rs.status = 'Approved'
+                     WHERE rs.student_id = ?
                        AND (r.is_archived = 0 OR r.is_archived IS NULL)
                      ORDER BY r.room_id DESC`,
                     [userId]
@@ -260,6 +339,8 @@ router.get('/my-rooms',
 
 router.get('/available', authenticateToken, authorizeRole([1]), async (req, res) => {
       try {
+        const studentId = req.user.user_id;
+
         // Auto-end expired sessions first
         await systemDB.query(`
           UPDATE game_sessions
@@ -291,7 +372,13 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
                 ELSE NULL
             END AS room_duration,
 
-            COUNT(rs.student_id) AS student_count
+            COUNT(rs.student_id) AS student_count,
+
+            (
+              SELECT rs2.status FROM room_students rs2
+              WHERE rs2.room_id = r.room_id AND rs2.student_id = ?
+              LIMIT 1
+            ) AS my_join_status
 
         FROM rooms r
 
@@ -311,7 +398,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
         WHERE (r.is_archived = 0 OR r.is_archived IS NULL)
 
         GROUP BY r.room_id, r.room_name, u.full_name;
-        `);
+        `, [studentId]);
 
         res.json({ rooms });
 
@@ -390,6 +477,38 @@ router.post('/approve/:id',
 
             res.json({ message: "Student approved" });
 
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ error: "Approval failed" });
+        }
+    }
+);
+
+router.post('/approve-all/:room_id',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            // Verify teacher owns this room
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) {
+                return res.status(403).json({ error: "Not allowed" });
+            }
+
+            await systemDB.query(
+                `UPDATE room_students
+                 SET status = 'Approved'
+                 WHERE room_id = ? AND status = 'Pending'`,
+                [room_id]
+            );
+
+            res.json({ message: "All pending students approved" });
         } catch (error) {
             console.error(error);
             res.status(500).json({ error: "Approval failed" });
