@@ -393,34 +393,87 @@ router.post("/requests/:id/approve", async (req, res) => {
     }
 
     const r = rows[0];
-    const full_name = `${r.first_name} ${r.last_name}`;
+    const full_name = [
+      r.first_name,
+      r.middle_name  ? r.middle_name  : null,
+      r.last_name,
+      r.extension_name ? r.extension_name : null
+    ].filter(Boolean).join(' ');
 
     const [result] = await systemDB.query(
       `INSERT INTO users
-        (first_name, last_name, full_name, sex, section, email, password, role_id, student_id, teacher_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (first_name, middle_name, last_name, extension_name, full_name,
+         sex, gender, civil_status, birthday,
+         email, password, role_id, student_id, teacher_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         r.first_name,
+        r.middle_name     || null,
         r.last_name,
+        r.extension_name  || null,
         full_name,
-        r.sex || null,
-        r.section || null,
+        r.sex             || null,
+        r.gender          || null,
+        r.civil_status    || null,
+        r.birthday        || null,
         r.email,
         r.password_hash,
         r.role_id,
-        r.student_id || null,
-        r.teacher_id || null
+        r.student_id      || null,
+        r.teacher_id      || null
       ]
     );
 
     const newUserId = result.insertId;
 
-    if (r.role_id == 2) {
-      const roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      await systemDB.query(
-        `INSERT INTO rooms (teacher_id, room_name, room_code) VALUES (?, ?, ?)`,
-        [newUserId, `${full_name}'s Room`, roomCode]
-      );
+    // ── If student: create enrollment + auto-join room ──
+    if (r.role_id == 1 && r.section_id && r.semester_id) {
+      // 1. Create student enrollment record
+      try {
+        await systemDB.query(
+          `INSERT IGNORE INTO student_enrollments
+           (user_id, course_id, year_level, section_id, semester_id)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            newUserId,
+            r.course_id  || null,
+            r.year_level || null,
+            r.section_id,
+            r.semester_id
+          ]
+        );
+      } catch (enrollErr) {
+        console.warn('[Approve] student_enrollments insert warning:', enrollErr.message);
+      }
+
+      // 2. Auto-join matching room (section + semester)
+      try {
+        const [matchingRooms] = await systemDB.query(
+          `SELECT room_id FROM rooms WHERE section_id = ? AND semester_id = ? LIMIT 1`,
+          [r.section_id, r.semester_id]
+        );
+        if (matchingRooms.length > 0) {
+          await systemDB.query(
+            `INSERT IGNORE INTO room_students (room_id, student_id, status)
+             VALUES (?, ?, 'Approved')`,
+            [matchingRooms[0].room_id, newUserId]
+          );
+        }
+      } catch (roomErr) {
+        console.warn('[Approve] room auto-join warning:', roomErr.message);
+      }
+
+      // 3. Mark student number as used
+      if (r.student_number) {
+        try {
+          await systemDB.query(
+            `UPDATE allowed_student_numbers SET is_used = 1 WHERE student_number = ?`,
+            [r.student_number]
+          );
+        } catch (asnErr) {
+          console.warn('[Approve] allowed_student_numbers mark-used warning:', asnErr.message);
+        }
+      }
     }
 
     await systemDB.query(

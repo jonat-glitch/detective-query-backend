@@ -23,9 +23,6 @@ router.post('/send-otp', async (req, res) => {
         }
 
         const emailLower = email.trim().toLowerCase();
-        if (!emailLower.endsWith('@gmail.com')) {
-            return res.status(400).json({ error: "Only valid @gmail.com email addresses are accepted." });
-        }
 
         // Check if account already exists in users or already approved
         const [existingUser] = await systemDB.query(
@@ -68,35 +65,174 @@ router.post('/send-otp', async (req, res) => {
     }
 });
 
-// ================= REGISTER (now requires verified OTP) =================
+// ================= PUBLIC: VALIDATE CLASS CODE =================
+// POST /validate-class-code
+// Returns: { valid: bool, section_id, section_name, course_id, course_code, year_level, semester_id }
+router.post('/validate-class-code', async (req, res) => {
+    try {
+        const { code } = req.body;
+        if (!code) return res.status(400).json({ error: 'Class code is required' });
+
+        const [rows] = await systemDB.query(
+            `SELECT cc.code_id, cc.section_id, cc.semester_id, cc.is_active, cc.expires_at,
+                    s.section_name, sem.school_year, sem.term
+             FROM class_codes cc
+             LEFT JOIN sections  s   ON s.section_id   = cc.section_id
+             LEFT JOIN semesters sem ON sem.semester_id = cc.semester_id
+             WHERE cc.code = ?`,
+            [code.trim().toUpperCase()]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ valid: false, error: 'Invalid class code. Please check with your teacher.' });
+        }
+
+        const cc = rows[0];
+
+        if (!cc.is_active) {
+            return res.status(400).json({ valid: false, error: 'This class code has been deactivated.' });
+        }
+
+        if (cc.expires_at && new Date(cc.expires_at) < new Date()) {
+            return res.status(400).json({ valid: false, error: 'This class code has expired.' });
+        }
+
+        res.json({
+            valid: true,
+            section_id:   cc.section_id,
+            section_name: cc.section_name,
+            semester_id:  cc.semester_id,
+            school_year:  cc.school_year,
+            term:         cc.term
+        });
+    } catch (err) {
+        console.error('[Validate Class Code Error]:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ================= PUBLIC: VALIDATE STUDENT NUMBER =================
+// POST /validate-student-number
+// Returns: { valid: bool, section_id, course_id, year_level, semester_id }
+router.post('/validate-student-number', async (req, res) => {
+    try {
+        const { student_number, section_id, semester_id } = req.body;
+        if (!student_number) return res.status(400).json({ error: 'Student number is required' });
+
+        const [rows] = await systemDB.query(
+            `SELECT id, section_id, course_id, year_level, semester_id, is_used
+             FROM allowed_student_numbers
+             WHERE student_number = ?`,
+            [student_number.trim()]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({
+                valid: false,
+                error: 'Student number not found. Make sure it matches your official student ID number, or contact your administrator.'
+            });
+        }
+
+        const asn = rows[0];
+
+        if (asn.is_used) {
+            return res.status(409).json({
+                valid: false,
+                error: 'This student number has already been registered. If this is an error, contact your administrator.'
+            });
+        }
+
+        // Cross-check section if class code was already validated
+        if (section_id && asn.section_id && asn.section_id !== Number(section_id)) {
+            return res.status(400).json({
+                valid: false,
+                error: 'Your student number does not match the class code section. Please verify with your teacher.'
+            });
+        }
+
+        res.json({
+            valid: true,
+            section_id:  asn.section_id,
+            course_id:   asn.course_id,
+            year_level:  asn.year_level,
+            semester_id: asn.semester_id
+        });
+    } catch (err) {
+        console.error('[Validate Student Number Error]:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ================= REGISTER (gated: class code + student number + OTP + admin approval) =================
 router.post('/register', async (req, res) => {
     try {
         const {
             first_name,
+            middle_name,
             last_name,
+            extension_name,
+            gender,
+            civil_status,
+            birthday,
             sex,
-            section,
             email,
             password,
             role_id,
             student_id,
+            student_number,
             teacher_id,
-            otp_code
+            otp_code,
+            class_code,
+            section_id,
+            course_id,
+            year_level,
+            semester_id
         } = req.body;
 
         if (!first_name || !last_name || !email || !password) {
             return res.status(400).json({ error: "Missing required fields" });
         }
 
-        // Gmail-only enforcement
         const emailLower = email.trim().toLowerCase();
-        if (!emailLower.endsWith('@gmail.com')) {
-            return res.status(400).json({ error: "Only @gmail.com email addresses are accepted for registration." });
+        const isStudent = (role_id || 1) == 1;
+
+        // ── Layer 2 & 3: Class code + student number required for students ──
+        if (isStudent) {
+            if (!class_code) {
+                return res.status(400).json({ error: "A class code is required to register as a student." });
+            }
+            if (!student_number) {
+                return res.status(400).json({ error: "Your student number is required." });
+            }
+
+            // Validate class code
+            const [ccRows] = await systemDB.query(
+                `SELECT code_id, is_active, expires_at FROM class_codes WHERE code = ?`,
+                [class_code.trim().toUpperCase()]
+            );
+            if (ccRows.length === 0 || !ccRows[0].is_active) {
+                return res.status(400).json({ error: "Invalid or inactive class code. Please check with your teacher." });
+            }
+            if (ccRows[0].expires_at && new Date(ccRows[0].expires_at) < new Date()) {
+                return res.status(400).json({ error: "This class code has expired. Please get a new one from your teacher." });
+            }
+
+            // Validate student number
+            const [asnRows] = await systemDB.query(
+                `SELECT id, is_used FROM allowed_student_numbers WHERE student_number = ?`,
+                [student_number.trim()]
+            );
+            if (asnRows.length === 0) {
+                return res.status(400).json({ error: "Student number not found in the system. Contact your administrator." });
+            }
+            if (asnRows[0].is_used) {
+                return res.status(409).json({ error: "This student number is already registered." });
+            }
         }
 
-        // Verify OTP code
+        // ── Layer 4: OTP ──
         if (!otp_code) {
-            return res.status(400).json({ error: "Email verification code is required. Please verify your Gmail first." });
+            return res.status(400).json({ error: "Email verification code is required." });
         }
 
         const storedOtp = otpStore.get(emailLower);
@@ -110,10 +246,10 @@ router.post('/register', async (req, res) => {
         }
 
         if (storedOtp.code !== otp_code.trim()) {
-            return res.status(400).json({ error: "Invalid verification code. Please check your Gmail inbox." });
+            return res.status(400).json({ error: "Invalid verification code. Please check your email inbox." });
         }
 
-        // OTP is valid - remove it
+        // OTP is valid — remove it
         otpStore.delete(emailLower);
 
         // Check if email already has an existing account
@@ -132,7 +268,6 @@ router.post('/register', async (req, res) => {
             if (status === 'approved') {
                 return res.status(409).json({ error: "This email has already been approved. Please log in." });
             }
-            // If pending or rejected, delete old record and replace with new submission
             await systemDB.query(
                 'DELETE FROM registration_requests WHERE email = ?', [emailLower]
             );
@@ -142,24 +277,36 @@ router.post('/register', async (req, res) => {
 
         await systemDB.query(
             `INSERT INTO registration_requests
-            (first_name, last_name, email, password_hash, role_id, sex, section, student_id, teacher_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (first_name, middle_name, last_name, extension_name, gender, civil_status, birthday,
+             email, password_hash, role_id, sex, student_id, student_number, teacher_id,
+             class_code, section_id, course_id, year_level, semester_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 first_name,
+                middle_name    || null,
                 last_name,
+                extension_name || null,
+                gender         || null,
+                civil_status   || null,
+                birthday       || null,
                 emailLower,
                 hashedPassword,
-                role_id || 1,
-                sex || null,
-                section || null,
-                student_id || null,
-                teacher_id || null
+                role_id        || 1,
+                sex            || null,
+                student_id     || null,
+                student_number || null,
+                teacher_id     || null,
+                class_code     || null,
+                section_id     || null,
+                course_id      || null,
+                year_level     || null,
+                semester_id    || null
             ]
         );
 
         res.status(202).json({
             message: "Request submitted",
-            detail: "Your access request has been submitted and is pending admin review. You will be notified by email once a decision is made."
+            detail: "Your access request has been submitted and is pending admin review. You will be notified by email once approved."
         });
 
     } catch (error) {

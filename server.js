@@ -23,6 +23,7 @@ const errorHandler = require('./middleware/errorHandler');
 const progressRoutes = require("./routes/progressRoutes");
 const difficultyProgressRoutes = require("./routes/difficultyProgressRoutes");
 const adminRoutes = require("./routes/adminRoutes");
+const adminSetupRoutes = require("./routes/adminSetupRoutes");
 const roomRoutes = require('./routes/roomRoutes');
 
 // ✅ FIXED (CASE SENSITIVE IMPORT)
@@ -38,7 +39,7 @@ app.set('trust proxy', 1);
 
 /* ================= MIDDLEWARE ================= */
 app.use(cors({
-    origin: "*",
+    origin: process.env.FRONTEND_URL || 'http://localhost:8100',
     methods: ["GET", "POST", "PUT", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"]
 }));
@@ -65,6 +66,7 @@ app.use('/api/difficulty-progress', difficultyProgressRoutes);
 
 // ADMIN
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/setup', adminSetupRoutes);
 
 // ROOMS
 app.use("/api/rooms", require("./routes/roomRoutes"));
