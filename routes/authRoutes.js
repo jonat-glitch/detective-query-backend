@@ -10,9 +10,7 @@ const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
-
-// In-memory OTP storage: email -> { code, expiresAt }
-const otpStore = new Map();
+const { setOtp, verifyOtp } = require('../utils/otpStore');
 
 // ================= SEND EMAIL VERIFICATION CODE (OTP) =================
 router.post('/send-otp', async (req, res) => {
@@ -41,16 +39,27 @@ router.post('/send-otp', async (req, res) => {
 
         // Generate 6-digit code
         const code = Math.floor(100000 + Math.random() * 900000).toString();
-        otpStore.set(emailLower, {
-            code,
-            expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes expiry
-        });
+        await setOtp(emailLower, code, 10);
 
-        // Send OTP via Gmail
+        console.log(`\n========================================`);
+        console.log(`🔑 [VERIFICATION OTP CODE]: ${code}`);
+        console.log(`📧 Target Email: ${emailLower}`);
+        console.log(`========================================\n`);
+
+        // Send OTP via Brevo
         try {
             await sendVerificationCode({ to: emailLower, code });
         } catch (mailErr) {
             console.error("[Send OTP Mail Error]:", mailErr);
+
+            // If Brevo blocks the local IP address, provide a dev fallback so local testing is never blocked:
+            if (mailErr.message && (mailErr.message.includes('unrecognised IP address') || mailErr.message.includes('unrecognised IP'))) {
+                return res.json({
+                    message: `Local Dev Notice: Brevo IP whitelist blocked local IP. Your verification code is: ${code} (also printed in backend terminal).`,
+                    devCode: code
+                });
+            }
+
             return res.status(500).json({
                 error: `Failed to send email to ${emailLower}: ${mailErr.message || 'SMTP Error'}. Please check your Gmail address or try again.`
             });
@@ -75,6 +84,7 @@ router.post('/validate-class-code', async (req, res) => {
 
         const [rows] = await systemDB.query(
             `SELECT cc.code_id, cc.section_id, cc.semester_id, cc.is_active, cc.expires_at,
+                    cc.is_archived,
                     s.section_name, sem.school_year, sem.term
              FROM class_codes cc
              LEFT JOIN sections  s   ON s.section_id   = cc.section_id
@@ -88,6 +98,11 @@ router.post('/validate-class-code', async (req, res) => {
         }
 
         const cc = rows[0];
+
+        // BUG-09 FIX: Reject archived class codes
+        if (cc.is_archived) {
+            return res.status(400).json({ valid: false, error: 'This class code has been archived and is no longer valid.' });
+        }
 
         if (!cc.is_active) {
             return res.status(400).json({ valid: false, error: 'This class code has been deactivated.' });
@@ -207,11 +222,12 @@ router.post('/register', async (req, res) => {
 
             // Validate class code
             const [ccRows] = await systemDB.query(
-                `SELECT code_id, is_active, expires_at FROM class_codes WHERE code = ?`,
+                `SELECT code_id, is_active, is_archived, expires_at FROM class_codes WHERE code = ?`,
                 [class_code.trim().toUpperCase()]
             );
-            if (ccRows.length === 0 || !ccRows[0].is_active) {
-                return res.status(400).json({ error: "Invalid or inactive class code. Please check with your teacher." });
+            // BUG-09 FIX: Also block archived codes during registration
+            if (ccRows.length === 0 || !ccRows[0].is_active || ccRows[0].is_archived) {
+                return res.status(400).json({ error: "Invalid, inactive, or archived class code. Please check with your teacher." });
             }
             if (ccRows[0].expires_at && new Date(ccRows[0].expires_at) < new Date()) {
                 return res.status(400).json({ error: "This class code has expired. Please get a new one from your teacher." });
@@ -235,22 +251,16 @@ router.post('/register', async (req, res) => {
             return res.status(400).json({ error: "Email verification code is required." });
         }
 
-        const storedOtp = otpStore.get(emailLower);
-        if (!storedOtp) {
-            return res.status(400).json({ error: "Verification code expired or not requested. Please request a new code." });
-        }
-
-        if (Date.now() > storedOtp.expiresAt) {
-            otpStore.delete(emailLower);
-            return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
-        }
-
-        if (storedOtp.code !== otp_code.trim()) {
+        const otpResult = await verifyOtp(emailLower, otp_code);
+        if (!otpResult.valid) {
+            if (otpResult.reason === 'NOT_FOUND') {
+                return res.status(400).json({ error: "Verification code expired or not requested. Please request a new code." });
+            }
+            if (otpResult.reason === 'EXPIRED') {
+                return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
+            }
             return res.status(400).json({ error: "Invalid verification code. Please check your email inbox." });
         }
-
-        // OTP is valid — remove it
-        otpStore.delete(emailLower);
 
         // Check if email already has an existing account
         const [existingUser] = await systemDB.query(

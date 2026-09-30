@@ -25,7 +25,7 @@ router.post('/create-room',
     async (req, res) => {
         try {
             const teacherId = req.user.user_id;
-            let { room_name, room_code } = req.body;
+            let { room_name, room_code, section_id, semester_id, course_id, year_level } = req.body;
 
             if (!room_name || !room_name.trim()) {
                 return res.status(400).json({ error: "Room name is required" });
@@ -61,14 +61,49 @@ router.post('/create-room',
             }
 
             const [result] = await systemDB.query(
-                `INSERT INTO rooms (teacher_id, room_name, room_code, is_archived)
-                 VALUES (?, ?, ?, 0)`,
-                [teacherId, room_name, room_code]
+                `INSERT INTO rooms (teacher_id, room_name, room_code, is_archived, section_id, semester_id, course_id, year_level)
+                 VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
+                [teacherId, room_name, room_code, section_id || null, semester_id || null, course_id || null, year_level || null]
             );
+
+            const newRoomId = result.insertId;
+
+            // 🚀 AUTO-ENROLL ALL STUDENTS IN THIS SECTION
+            if (section_id) {
+                try {
+                    const [students] = await systemDB.query(`
+                        SELECT DISTINCT u.user_id
+                        FROM users u
+                        LEFT JOIN allowed_student_numbers asn ON (asn.student_number = u.student_id)
+                        LEFT JOIN student_enrollments se ON (se.user_id = u.user_id)
+                        WHERE u.role_id = 1
+                          AND (se.section_id = ? OR asn.section_id = ?)
+                    `, [section_id, section_id]);
+
+                    for (const s of students) {
+                        await systemDB.query(
+                            `INSERT INTO room_students (room_id, student_id, status)
+                             VALUES (?, ?, 'Approved')
+                             ON DUPLICATE KEY UPDATE status = 'Approved'`,
+                            [newRoomId, s.user_id]
+                        );
+                        if (semester_id) {
+                            await systemDB.query(
+                                `INSERT IGNORE INTO student_enrollments
+                                 (user_id, course_id, year_level, section_id, semester_id)
+                                 VALUES (?, ?, ?, ?, ?)`,
+                                [s.user_id, course_id || null, year_level || null, section_id, semester_id]
+                            );
+                        }
+                    }
+                } catch (autoErr) {
+                    console.error('[Create Room] Auto-enroll error:', autoErr);
+                }
+            }
 
             res.json({
                 message: "Room created",
-                room_id: result.insertId,
+                room_id: newRoomId,
                 room_code: room_code
             });
 
@@ -306,17 +341,61 @@ router.get('/my-rooms',
             const isArchived = req.query.archived === 'true' ? 1 : 0;
 
             if (roleId === 2) {
-                // Teacher's created rooms
+                // Auto-sync students of any section rooms owned by this teacher
+                try {
+                    await systemDB.query(`
+                        INSERT IGNORE INTO room_students (room_id, student_id, status)
+                        SELECT DISTINCT r.room_id, u.user_id, 'Approved'
+                        FROM rooms r
+                        JOIN users u ON u.role_id = 1
+                        LEFT JOIN allowed_student_numbers asn ON (asn.student_number = u.student_id)
+                        LEFT JOIN student_enrollments se ON (se.user_id = u.user_id)
+                        WHERE r.teacher_id = ? AND r.section_id IS NOT NULL
+                          AND (se.section_id = r.section_id OR asn.section_id = r.section_id)
+                          AND (r.is_archived = 0 OR r.is_archived IS NULL)
+                    `, [userId]);
+                } catch (syncErr) {
+                    console.error('[my-rooms teacher sync]:', syncErr);
+                }
+
+                // Teacher's created rooms (with normalized section, course, semester metadata)
                 const [rooms] = await systemDB.query(
-                    `SELECT room_id, room_name, room_code, is_archived, archived_at,
-                            (SELECT COUNT(*) FROM room_students rs WHERE rs.room_id = rooms.room_id AND rs.status = 'Approved') AS student_count
-                     FROM rooms
-                     WHERE teacher_id = ? AND (is_archived = ? OR (? = 0 AND is_archived IS NULL))
-                     ORDER BY room_id DESC`,
+                    `SELECT r.room_id, r.room_name, r.room_code, r.is_archived, r.archived_at,
+                            r.section_id, r.semester_id, r.course_id, r.year_level,
+                            s.section_name, c.course_code, c.course_name,
+                            sem.school_year, sem.term, sem.is_active AS semester_active,
+                            (SELECT COUNT(DISTINCT rs.student_id) FROM room_students rs WHERE rs.room_id = r.room_id AND rs.status = 'Approved') AS student_count
+                     FROM rooms r
+                     LEFT JOIN sections s ON s.section_id = r.section_id
+                     LEFT JOIN courses c ON c.course_id = r.course_id
+                     LEFT JOIN semesters sem ON sem.semester_id = r.semester_id
+                     WHERE r.teacher_id = ? AND (r.is_archived = ? OR (? = 0 AND r.is_archived IS NULL))
+                     ORDER BY r.room_id DESC`,
                     [userId, isArchived, isArchived]
                 );
                 return res.json(rooms);
             } else {
+                // If student: auto-enroll into all active rooms matching the student's section
+                try {
+                    await systemDB.query(`
+                        INSERT IGNORE INTO room_students (room_id, student_id, status)
+                        SELECT DISTINCT r.room_id, ?, 'Approved'
+                        FROM rooms r
+                        JOIN (
+                            SELECT DISTINCT se.section_id
+                            FROM student_enrollments se WHERE se.user_id = ?
+                            UNION
+                            SELECT DISTINCT asn.section_id
+                            FROM users u
+                            JOIN allowed_student_numbers asn ON asn.student_number = u.student_id
+                            WHERE u.user_id = ? AND asn.section_id IS NOT NULL
+                        ) sec ON sec.section_id = r.section_id
+                        WHERE (r.is_archived = 0 OR r.is_archived IS NULL)
+                    `, [userId, userId, userId]);
+                } catch (syncErr) {
+                    console.error('[my-rooms student sync]:', syncErr);
+                }
+
                 // Student's joined & approved/pending rooms
                 const [rooms] = await systemDB.query(
                     `SELECT r.room_id, r.room_name, r.room_code, rs.status AS join_status
@@ -333,6 +412,34 @@ router.get('/my-rooms',
         } catch (error) {
             console.error(error);
             res.status(500).json({ error: "Failed to fetch rooms" });
+        }
+    }
+);
+
+// ── Teacher: Fetch assigned sections for the active semester ──
+router.get('/teacher/assigned-sections',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const teacherId = req.user.user_id;
+            const [assignments] = await systemDB.query(`
+                SELECT tsa.assignment_id, tsa.teacher_id, tsa.section_id, tsa.course_id,
+                       tsa.year_level, tsa.semester_id, tsa.subject_name,
+                       s.section_name, c.course_code, c.course_name,
+                       sem.school_year, sem.term, sem.is_active
+                FROM teacher_section_assignments tsa
+                JOIN sections s   ON s.section_id   = tsa.section_id
+                JOIN courses  c   ON c.course_id    = tsa.course_id
+                JOIN semesters sem ON sem.semester_id = tsa.semester_id
+                WHERE tsa.teacher_id = ? AND sem.is_active = 1
+                ORDER BY s.section_name ASC
+            `, [teacherId]);
+
+            res.json({ assignments });
+        } catch (err) {
+            console.error('Fetch teacher assigned sections error:', err);
+            res.status(500).json({ error: 'Failed to fetch assigned sections' });
         }
     }
 );
@@ -1359,9 +1466,9 @@ router.get('/students/:room_id',
             const { room_id } = req.params;
             const teacherId = req.user.user_id;
 
-            // Verify ownership
+            // Verify ownership + get metadata
             const [room] = await systemDB.query(
-                `SELECT 1 FROM rooms
+                `SELECT room_id, section_id, semester_id, course_id, year_level FROM rooms
                  WHERE room_id = ? AND teacher_id = ?`,
                 [room_id, teacherId]
             );
@@ -1370,8 +1477,38 @@ router.get('/students/:room_id',
                 return res.status(403).json({ error: "Not your room" });
             }
 
+            const roomMeta = room[0];
+            if (roomMeta.section_id) {
+                try {
+                    await systemDB.query(`
+                        INSERT IGNORE INTO room_students (room_id, student_id, status)
+                        SELECT DISTINCT ?, u.user_id, 'Approved'
+                        FROM users u
+                        LEFT JOIN allowed_student_numbers asn ON (asn.student_number = u.student_id)
+                        LEFT JOIN student_enrollments se ON (se.user_id = u.user_id)
+                        WHERE u.role_id = 1
+                          AND (se.section_id = ? OR asn.section_id = ?)
+                    `, [room_id, roomMeta.section_id, roomMeta.section_id]);
+
+                    if (roomMeta.course_id && roomMeta.semester_id) {
+                        await systemDB.query(`
+                            INSERT IGNORE INTO student_enrollments
+                            (user_id, course_id, year_level, section_id, semester_id)
+                            SELECT DISTINCT u.user_id, ?, ?, ?, ?
+                            FROM users u
+                            LEFT JOIN allowed_student_numbers asn ON (asn.student_number = u.student_id)
+                            LEFT JOIN student_enrollments se ON (se.user_id = u.user_id)
+                            WHERE u.role_id = 1
+                              AND (se.section_id = ? OR asn.section_id = ?)
+                        `, [roomMeta.course_id, roomMeta.year_level || 1, roomMeta.section_id, roomMeta.semester_id, roomMeta.section_id, roomMeta.section_id]);
+                    }
+                } catch (syncErr) {
+                    console.error('[students/:room_id sync]:', syncErr);
+                }
+            }
+
             const [students] = await systemDB.query(
-                `SELECT u.user_id, u.full_name
+                `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id
                  FROM room_students rs
                  JOIN users u ON rs.student_id = u.user_id
                  WHERE rs.room_id = ?

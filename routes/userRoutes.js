@@ -269,9 +269,7 @@ router.put('/change-password', authenticateToken, async (req, res) => {
 });
 
 const { sendVerificationCode } = require('../services/emailService');
-
-// In-memory OTP storage for email changes: `${userId}_${email}` -> { code, expiresAt }
-const changeEmailOtpStore = new Map();
+const { setOtp, verifyOtp } = require('../utils/otpStore');
 
 // ───────────────────────────────────────────────────────────────
 // 📧 Send OTP to New Email/Gmail Address for verification
@@ -309,10 +307,7 @@ router.post('/send-change-email-otp', authenticateToken, async (req, res) => {
         // Generate 6-digit OTP code
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const otpKey = `${userId}_${emailLower}`;
-        changeEmailOtpStore.set(otpKey, {
-            code,
-            expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
-        });
+        await setOtp(otpKey, code, 10);
 
         // Send OTP via Brevo to the NEW email
         try {
@@ -399,20 +394,16 @@ router.post('/request-change', authenticateToken, async (req, res) => {
             }
 
             const otpKey = `${userId}_${storedNewValue}`;
-            const storedOtp = changeEmailOtpStore.get(otpKey);
-            if (!storedOtp) {
-                return res.status(400).json({ error: "No active verification code found for this email. Please click 'Send OTP' first." });
-            }
-            if (Date.now() > storedOtp.expiresAt) {
-                changeEmailOtpStore.delete(otpKey);
-                return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
-            }
-            if (storedOtp.code !== String(otp_code).trim()) {
+            const otpResult = await verifyOtp(otpKey, otp_code);
+            if (!otpResult.valid) {
+                if (otpResult.reason === 'NOT_FOUND') {
+                    return res.status(400).json({ error: "No active verification code found for this email. Please click 'Send OTP' first." });
+                }
+                if (otpResult.reason === 'EXPIRED') {
+                    return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
+                }
                 return res.status(400).json({ error: "Invalid verification code. Please check your new email and enter the correct 6-digit code." });
             }
-
-            // OTP is valid - consume it
-            changeEmailOtpStore.delete(otpKey);
             oldValue = user.email;
         }
 

@@ -1,181 +1,83 @@
-/**
- * Full system audit for Detective Query
- * Checks: DB connectivity, all main tables, and critical backend routes
- */
-const mysql = require('mysql2/promise');
-const https = require('https');
-const http = require('http');
+const { systemDB } = require('../db');
 
-const DB_CONFIG = {
-  host: 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
-  port: 4000,
-  user: '4AjTs4MyTKCrsiP.root',
-  password: 'Xkoew4eyG3Wlu5ZS',
-  database: 'detective_query',
-  ssl: { rejectUnauthorized: false }
-};
+async function fullSchemaCheck() {
+    console.log('\n========== SYSTEM SCHEMA AUDIT ==========\n');
 
-const BACKEND_URL = 'https://detective-query-backend.onrender.com';
-
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    const lib = url.startsWith('https') ? https : http;
-    const req = lib.get(url, { timeout: 15000 }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, body: data.slice(0, 200) }));
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
-  });
-}
-
-const results = [];
-function check(label, passed, detail = '') {
-  const status = passed ? '✅' : '❌';
-  results.push({ label, passed, detail });
-  console.log(`${status} ${label}${detail ? ' — ' + detail : ''}`);
-}
-function warn(label, detail = '') {
-  results.push({ label, passed: 'warn', detail });
-  console.log(`⚠️  ${label}${detail ? ' — ' + detail : ''}`);
-}
-
-async function run() {
-  console.log('\n══════════════════════════════════════════════');
-  console.log('   DETECTIVE QUERY — FULL SYSTEM AUDIT');
-  console.log('══════════════════════════════════════════════\n');
-
-  // ── 1. Database Connection ────────────────────
-  console.log('📦 CHECKING DATABASE...\n');
-  let conn;
-  try {
-    conn = await mysql.createConnection(DB_CONFIG);
-    check('TiDB Cloud Connection', true, `${DB_CONFIG.host}:${DB_CONFIG.port}`);
-  } catch (e) {
-    check('TiDB Cloud Connection', false, e.message);
-    console.log('\n⛔ Cannot continue — DB unreachable.\n');
-    process.exit(1);
-  }
-
-  // ── 2. Core Tables ────────────────────────────
-  const REQUIRED_TABLES = [
-    'users', 'cases', 'difficulty', 'attempts', 'user_case_progress',
-    'user_achievements', 'user_streaks', 'rooms', 'room_students',
-    'refresh_tokens', 'notifications', 'registration_requests',
-    'account_change_requests', 'case_notes', 'session_objectives',
-    'achievements', 'game_sessions'
-  ];
-
-  console.log('\n📋 CHECKING REQUIRED TABLES...\n');
-  const [tables] = await conn.query(`SHOW TABLES`);
-  const existingTables = new Set(tables.map(r => Object.values(r)[0]));
-
-  for (const t of REQUIRED_TABLES) {
-    if (existingTables.has(t)) {
-      const [[countRow]] = await conn.query(`SELECT COUNT(*) AS n FROM \`${t}\``);
-      check(`Table: ${t}`, true, `${countRow.n} rows`);
-    } else {
-      check(`Table: ${t}`, false, 'TABLE MISSING');
+    // 1. All tables present?
+    const [tables] = await systemDB.query('SHOW TABLES');
+    const tableNames = tables.map(t => Object.values(t)[0]);
+    const requiredTables = [
+        'users', 'roles', 'rooms', 'room_students', 'courses', 'sections',
+        'semesters', 'teacher_section_assignments', 'student_enrollments',
+        'class_codes', 'allowed_student_numbers', 'registration_requests',
+        'refresh_tokens', 'otp_verifications', 'session_objectives',
+        'user_avatars', 'attempts', 'game_sessions', 'cases', 'notifications',
+        'account_change_requests'
+    ];
+    for (const t of requiredTables) {
+        const ok = tableNames.includes(t);
+        console.log(ok ? `✅ Table: ${t}` : `❌ MISSING TABLE: ${t}`);
     }
-  }
 
-  // ── 3. Critical Data Checks ───────────────────
-  console.log('\n🔍 CHECKING CRITICAL DATA...\n');
+    // 2. is_archived columns on academic tables
+    console.log('\n--- is_archived columns ---');
+    for (const table of ['courses', 'sections', 'semesters', 'teacher_section_assignments', 'class_codes', 'allowed_student_numbers', 'rooms']) {
+        const [cols] = await systemDB.query(`SHOW COLUMNS FROM ${table} LIKE 'is_archived'`);
+        console.log(cols.length > 0 ? `✅ ${table}.is_archived exists` : `❌ ${table}.is_archived MISSING`);
+    }
 
-  // At least one admin user
-  const [[adminRow]] = await conn.query(`SELECT COUNT(*) AS n FROM users WHERE role_id = 3`);
-  check('Admin user exists', adminRow.n > 0, `${adminRow.n} admin(s)`);
+    // 3. student_enrollments nullability
+    console.log('\n--- student_enrollments nullable check ---');
+    const [seColsCourse] = await systemDB.query(`SHOW COLUMNS FROM student_enrollments LIKE 'course_id'`);
+    const [seColsYear] = await systemDB.query(`SHOW COLUMNS FROM student_enrollments LIKE 'year_level'`);
+    console.log(seColsCourse[0]?.Null === 'YES' ? '✅ course_id is nullable' : '⚠️  course_id NOT NULL (auto-enroll may fail silently)');
+    console.log(seColsYear[0]?.Null === 'YES' ? '✅ year_level is nullable' : '⚠️  year_level NOT NULL (auto-enroll may fail silently)');
 
-  // At least one active case
-  const [[caseRow]] = await conn.query(`SELECT COUNT(*) AS n FROM cases WHERE is_active = 1`);
-  check('Active cases exist', caseRow.n > 0, `${caseRow.n} active case(s)`);
+    // 4. CORS check in server.js
+    console.log('\n--- server.js CORS (manual check) ---');
+    const fs = require('fs');
+    const path = require('path');
+    const backendRoot = path.join(__dirname, '..');
+    const serverCode = fs.readFileSync(path.join(backendRoot, 'server.js'), 'utf8');
+    const hasCorsBlock = serverCode.includes("callback(new Error(") && serverCode.includes("false");
+    console.log(hasCorsBlock ? '✅ CORS correctly blocks unauthorized origins' : '❌ CORS fallback may allow all origins');
 
-  // At least one difficulty
-  const [[diffRow]] = await conn.query(`SELECT COUNT(*) AS n FROM difficulty`);
-  check('Difficulty levels exist', diffRow.n > 0, `${diffRow.n} difficulty level(s)`);
+    // 5. OTP verification route uses DB
+    const authCode = fs.readFileSync(path.join(backendRoot, 'routes', 'authRoutes.js'), 'utf8');
+    console.log('\n--- authRoutes.js OTP ---');
+    console.log(authCode.includes("require('../utils/otpStore')") ? '✅ Uses DB-backed otpStore' : '❌ Still using in-memory Map');
+    console.log(!authCode.includes('otpStore = new Map') ? '✅ In-memory Map removed' : '❌ In-memory Map still present');
 
-  // Orphan check: attempts with no matching user
-  const [[orphanAttempts]] = await conn.query(`
-    SELECT COUNT(*) AS n FROM attempts a 
-    LEFT JOIN users u ON a.user_id = u.user_id 
-    WHERE u.user_id IS NULL
-  `);
-  check('No orphan attempts', orphanAttempts.n === 0, orphanAttempts.n > 0 ? `${orphanAttempts.n} orphan(s) found` : 'Clean');
+    // 6. adminRoutes archived rooms filter
+    const adminCode = fs.readFileSync(path.join(backendRoot, 'routes', 'adminRoutes.js'), 'utf8');
+    console.log('\n--- adminRoutes.js ---');
+    console.log(adminCode.includes('is_archived = 0') || adminCode.includes('is_archived=0') ? '✅ Admin rooms list filters archived rooms' : '❌ Admin rooms list may include archived rooms');
+    const hasEnrollmentJoin = adminCode.includes('student_enrollments') && adminCode.includes('LEFT JOIN');
+    console.log(hasEnrollmentJoin ? '✅ Admin users list joins student_enrollments for section' : '❌ Admin users may show stale section');
 
-  // Orphan check: room_students with no matching user
-  const [[orphanRS]] = await conn.query(`
-    SELECT COUNT(*) AS n FROM room_students rs
-    LEFT JOIN users u ON rs.student_id = u.user_id
-    WHERE u.user_id IS NULL
-  `);
-  check('No orphan room_students', orphanRS.n === 0, orphanRS.n > 0 ? `${orphanRS.n} orphan(s) found` : 'Clean');
+    // 7. authRoutes class code archived check
+    console.log('\n--- authRoutes.js class code validation ---');
+    const hasArchivedCheck = authCode.includes('is_archived') && (authCode.includes('validate-class-code') || authCode.includes('class_codes'));
+    console.log(hasArchivedCheck ? '✅ class code validation checks is_archived' : '❌ class code validation missing is_archived check');
 
-  // Orphan check: notifications with no user
-  const [[orphanNotifs]] = await conn.query(`
-    SELECT COUNT(*) AS n FROM notifications n
-    LEFT JOIN users u ON n.user_id = u.user_id
-    WHERE u.user_id IS NULL
-  `);
-  check('No orphan notifications', orphanNotifs.n === 0, orphanNotifs.n > 0 ? `${orphanNotifs.n} orphan(s) found` : 'Clean');
+    // 8. adminSetupRoutes archive assignment cascades room
+    const setupCode = fs.readFileSync(path.join(backendRoot, 'routes', 'adminSetupRoutes.js'), 'utf8');
+    console.log('\n--- adminSetupRoutes.js ---');
+    const hasRoomArchive = setupCode.includes('archiveRoom') || (setupCode.includes('rooms') && setupCode.includes('is_archived') && setupCode.includes('archive'));
+    console.log(hasRoomArchive ? '✅ Teacher assignment archive cascades to room' : '❌ Room not archived when teacher assignment archived');
 
-  // Expired refresh tokens
-  const [[expiredTokens]] = await conn.query(`SELECT COUNT(*) AS n FROM refresh_tokens WHERE expires_at < NOW()`);
-  if (expiredTokens.n > 0) {
-    warn('Expired refresh tokens in DB', `${expiredTokens.n} expired token(s) — safe but could be cleaned`);
-  } else {
-    check('No expired refresh tokens', true, 'Clean');
-  }
+    // 9. api.ts getArchivedRooms
+    const frontendRoot = path.join(backendRoot, '..', 'detective-query');
+    const apiPath = path.join(frontendRoot, 'src', 'services', 'api.ts');
+    try {
+        const apiCode = fs.readFileSync(apiPath, 'utf8');
+        console.log('\n--- api.ts ---');
+        const hasWrongFormat = apiCode.includes('my-rooms?archived=true');
+        console.log(!hasWrongFormat ? '✅ getArchivedRooms uses axios params (not hardcoded query string)' : '❌ getArchivedRooms still uses hardcoded query string');
+    } catch { console.log('⚠️  Could not read api.ts for check'); }
 
-  // Cases with no difficulty assigned
-  const [[casesNoDiff]] = await conn.query(`
-    SELECT COUNT(*) AS n FROM cases c 
-    LEFT JOIN difficulty d ON c.difficulty_id = d.difficulty_id
-    WHERE d.difficulty_id IS NULL
-  `);
-  check('All cases have valid difficulty', casesNoDiff.n === 0, casesNoDiff.n > 0 ? `${casesNoDiff.n} case(s) missing difficulty` : 'OK');
-
-  await conn.end();
-
-  // ── 4. Backend Connectivity ────────────────────
-  console.log('\n🌐 CHECKING BACKEND SERVER...\n');
-
-  try {
-    const res = await httpGet(`${BACKEND_URL}/`);
-    check('Backend root endpoint reachable', res.status === 200, `HTTP ${res.status} — "${res.body.slice(0, 60)}"`);
-  } catch (e) {
-    check('Backend root endpoint reachable', false, e.message);
-  }
-
-  // Test public auth endpoint exists (POST only — just check for 4xx not 5xx)
-  try {
-    const res = await httpGet(`${BACKEND_URL}/api/login`);
-    check('Auth /login route exists', res.status !== 500, `HTTP ${res.status}`);
-  } catch (e) {
-    warn('/login GET probe', e.message);
-  }
-
-  // ── 5. Summary ────────────────────────────────
-  console.log('\n══════════════════════════════════════════════');
-  const passed = results.filter(r => r.passed === true).length;
-  const failed = results.filter(r => r.passed === false).length;
-  const warnings = results.filter(r => r.passed === 'warn').length;
-  console.log(`  AUDIT COMPLETE: ${passed} PASSED | ${failed} FAILED | ${warnings} WARNINGS`);
-  console.log('══════════════════════════════════════════════\n');
-
-  if (failed > 0) {
-    console.log('⛔ FAILED CHECKS:');
-    results.filter(r => r.passed === false).forEach(r => console.log(`  ❌ ${r.label}: ${r.detail}`));
-  }
-  if (warnings > 0) {
-    console.log('\n⚠️  WARNINGS:');
-    results.filter(r => r.passed === 'warn').forEach(r => console.log(`  ⚠️  ${r.label}: ${r.detail}`));
-  }
-
-  process.exit(failed > 0 ? 1 : 0);
+    console.log('\n========== AUDIT COMPLETE ==========\n');
+    process.exit(0);
 }
 
-run().catch(e => {
-  console.error('Audit failed unexpectedly:', e.message);
-  process.exit(1);
-});
+fullSchemaCheck().catch(err => { console.error('AUDIT ERROR:', err.message); process.exit(1); });

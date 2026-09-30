@@ -58,6 +58,7 @@ router.get("/stats", async (req, res) => {
 // ─────────────────────────────────────────────
 router.get("/users", async (req, res) => {
   try {
+    // BUG-17 FIX: Join student_enrollments for normalized section data
     const [users] = await systemDB.query(`
       SELECT 
         u.user_id, 
@@ -67,7 +68,7 @@ router.get("/users", async (req, res) => {
         u.email, 
         u.role_id, 
         u.sex,
-        u.section,
+        COALESCE(s.section_name, u.section) AS section,
         u.student_id,
         u.teacher_id,
         u.total_points, 
@@ -76,6 +77,9 @@ router.get("/users", async (req, res) => {
         (SELECT COUNT(*) FROM user_case_progress ucp WHERE ucp.user_id = u.user_id AND (ucp.status = 'Completed' OR ucp.status = 'solved' OR ucp.completed_at IS NOT NULL)) AS solved_cases,
         (SELECT COALESCE(current_streak, 0) FROM user_streaks us WHERE us.user_id = u.user_id LIMIT 1) AS streak
       FROM users u
+      LEFT JOIN student_enrollments se ON se.user_id = u.user_id
+        AND se.semester_id = (SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1)
+      LEFT JOIN sections s ON s.section_id = se.section_id
       ORDER BY u.role_id ASC, u.total_points DESC, u.created_at DESC
     `);
 
@@ -179,7 +183,8 @@ router.delete("/users/:id", async (req, res) => {
     await systemDB.query("DELETE FROM user_achievements WHERE user_id = ?", [userId]);
     await systemDB.query("DELETE FROM case_notes WHERE user_id = ?", [userId]);
     await systemDB.query("DELETE FROM attempts WHERE user_id = ?", [userId]);
-    await systemDB.query("DELETE FROM session_objectives WHERE user_id = ?", [userId]);
+    // BUG-15 FIX: Wrap in try-catch in case table doesn't exist yet
+    try { await systemDB.query("DELETE FROM session_objectives WHERE user_id = ?", [userId]); } catch (_) {}
     await systemDB.query("DELETE FROM room_students WHERE student_id = ?", [userId]);
 
     // 3. Clean up notifications (both received and sent)
@@ -265,20 +270,29 @@ router.put("/cases/:id/toggle", async (req, res) => {
 // ─────────────────────────────────────────────
 router.get("/rooms", async (req, res) => {
   try {
+    // BUG-10 FIX: Exclude archived rooms from admin rooms list
+    const showArchived = req.query.archived === 'true' ? 1 : 0;
     const [rooms] = await systemDB.query(`
       SELECT 
         r.room_id,
         r.room_name,
         r.room_code,
-        1 AS is_active,
+        r.is_archived,
         r.created_at,
         u.full_name AS teacher_name,
         u.email AS teacher_email,
-        (SELECT COUNT(*) FROM room_students rs WHERE rs.room_id = r.room_id) AS student_count
+        s.section_name,
+        c.course_code,
+        sem.school_year, sem.term,
+        (SELECT COUNT(*) FROM room_students rs WHERE rs.room_id = r.room_id AND rs.status = 'Approved') AS student_count
       FROM rooms r
       LEFT JOIN users u ON r.teacher_id = u.user_id
+      LEFT JOIN sections s ON s.section_id = r.section_id
+      LEFT JOIN courses c ON c.course_id = r.course_id
+      LEFT JOIN semesters sem ON sem.semester_id = r.semester_id
+      WHERE (r.is_archived = ? OR (? = 0 AND r.is_archived IS NULL))
       ORDER BY r.created_at DESC
-    `);
+    `, [showArchived, showArchived]);
 
     res.json(rooms);
   } catch (error) {
@@ -446,17 +460,18 @@ router.post("/requests/:id/approve", async (req, res) => {
         console.warn('[Approve] student_enrollments insert warning:', enrollErr.message);
       }
 
-      // 2. Auto-join matching room (section + semester)
+      // 2. Auto-join matching rooms (section)
       try {
         const [matchingRooms] = await systemDB.query(
-          `SELECT room_id FROM rooms WHERE section_id = ? AND semester_id = ? LIMIT 1`,
-          [r.section_id, r.semester_id]
+          `SELECT room_id FROM rooms WHERE section_id = ? AND (is_archived = 0 OR is_archived IS NULL)`,
+          [r.section_id]
         );
-        if (matchingRooms.length > 0) {
+        for (const mr of matchingRooms) {
           await systemDB.query(
-            `INSERT IGNORE INTO room_students (room_id, student_id, status)
-             VALUES (?, ?, 'Approved')`,
-            [matchingRooms[0].room_id, newUserId]
+            `INSERT INTO room_students (room_id, student_id, status)
+             VALUES (?, ?, 'Approved')
+             ON DUPLICATE KEY UPDATE status = 'Approved'`,
+            [mr.room_id, newUserId]
           );
         }
       } catch (roomErr) {

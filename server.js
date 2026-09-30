@@ -38,9 +38,23 @@ const app = express();
 app.set('trust proxy', 1);
 
 /* ================= MIDDLEWARE ================= */
+const allowedOrigins = [
+    'https://detective-query.vercel.app',
+    'http://localhost:5173',
+    'http://localhost:8100',
+    'http://localhost:3000',
+    process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:8100',
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin) || origin.startsWith('http://localhost:')) {
+            return callback(null, true);
+        }
+        // BUG-06 FIX: Block unauthorized origins in production
+        return callback(new Error(`CORS: Origin '${origin}' not allowed`), false);
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
@@ -141,11 +155,22 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.user_id;
 
-        // 1. Fetch basic profile info
+        // 1. Fetch basic profile info (with normalized enrollment & personal fields)
         const [userRows] = await systemDB.query(
-            `SELECT user_id, full_name, email, role_id, avatar, total_points, current_level, section, created_at, student_id
-             FROM users
-             WHERE user_id = ?`,
+            `SELECT u.user_id, u.first_name, u.middle_name, u.last_name, u.extension_name, u.full_name,
+                    u.email, u.role_id, u.avatar, u.total_points, u.current_level,
+                    u.gender, u.civil_status, u.birthday, u.created_at, u.student_id, u.teacher_id,
+                    COALESCE(s.section_name, u.section) AS section,
+                    s.section_name,
+                    se.year_level, c.course_code, c.course_name,
+                    sem.school_year, sem.term
+             FROM users u
+             LEFT JOIN student_enrollments se ON se.user_id = u.user_id
+               AND se.semester_id = (SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1)
+             LEFT JOIN sections s ON s.section_id = se.section_id
+             LEFT JOIN courses c ON c.course_id = se.course_id
+             LEFT JOIN semesters sem ON sem.semester_id = se.semester_id
+             WHERE u.user_id = ?`,
             [userId]
         );
 
