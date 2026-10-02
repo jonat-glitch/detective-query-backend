@@ -41,10 +41,13 @@ router.post('/send-otp', async (req, res) => {
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         await setOtp(emailLower, code, 10);
 
-        console.log(`\n========================================`);
-        console.log(`🔑 [VERIFICATION OTP CODE]: ${code}`);
-        console.log(`📧 Target Email: ${emailLower}`);
-        console.log(`========================================\n`);
+        // Only print OTP to terminal in development (never in production logs)
+        if (process.env.NODE_ENV !== 'production') {
+            console.log(`\n========================================`);
+            console.log(`🔑 [VERIFICATION OTP CODE]: ${code}`);
+            console.log(`📧 Target Email: ${emailLower}`);
+            console.log(`========================================\n`);
+        }
 
         // Send OTP via Brevo
         try {

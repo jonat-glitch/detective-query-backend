@@ -30,7 +30,16 @@ function authorizeRole(allowedRoles) {
     };
 }
 
+// Convenience shorthand: only role_id === 3 (admin) passes
+function requireAdmin(req, res, next) {
+    if (!req.user || req.user.role_id !== 3) {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+}
+
 module.exports = {
     authenticateToken,
-    authorizeRole
+    authorizeRole,
+    requireAdmin,
 };

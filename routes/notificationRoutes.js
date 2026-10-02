@@ -14,7 +14,10 @@ router.get("/students/all", authenticateToken, async (req, res) => {
     const [rows] = await systemDB.query(
       `SELECT user_id, student_id,
               COALESCE(NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), full_name, email) AS full_name,
-              section
+              email,
+              section,
+              COALESCE(total_points, 0) AS total_points,
+              COALESCE(current_level, 1) AS current_level
        FROM users WHERE role_id = 1 ORDER BY full_name ASC`
     );
     res.json(rows);
@@ -30,7 +33,10 @@ router.get("/students/section/:section", authenticateToken, async (req, res) => 
     const [rows] = await systemDB.query(
       `SELECT user_id, student_id,
               COALESCE(NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), full_name, email) AS full_name,
-              section
+              email,
+              section,
+              COALESCE(total_points, 0) AS total_points,
+              COALESCE(current_level, 1) AS current_level
        FROM users WHERE role_id = 1 AND section = ? ORDER BY full_name ASC`,
       [section]
     );

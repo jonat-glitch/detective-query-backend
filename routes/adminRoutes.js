@@ -53,33 +53,62 @@ router.get("/stats", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// 📋 GET All Users (Enhanced with details)
+// 📋 GET All Users (Enhanced with academic alignment & demographics)
 // GET /api/admin/users
 // ─────────────────────────────────────────────
 router.get("/users", async (req, res) => {
   try {
-    // BUG-17 FIX: Join student_enrollments for normalized section data
     const [users] = await systemDB.query(`
       SELECT 
         u.user_id, 
         u.first_name,
+        u.middle_name,
         u.last_name,
+        u.extension_name,
         u.full_name, 
         u.email, 
         u.role_id, 
         u.sex,
+        u.gender,
+        u.civil_status,
+        u.birthday,
+        u.section AS raw_section,
         COALESCE(s.section_name, u.section) AS section,
         u.student_id,
         u.teacher_id,
         u.total_points, 
         u.current_level,
         u.created_at,
+        -- Academic Enrollment details (for students)
+        se.enrollment_id,
+        se.course_id,
+        c.course_code,
+        c.course_name,
+        se.section_id,
+        s.section_name,
+        se.year_level,
+        se.semester_id,
+        sem.school_year,
+        sem.term AS semester_term,
+        sem.is_active AS semester_is_active,
+        -- Solved Cases & Streak
         (SELECT COUNT(*) FROM user_case_progress ucp WHERE ucp.user_id = u.user_id AND (ucp.status = 'Completed' OR ucp.status = 'solved' OR ucp.completed_at IS NOT NULL)) AS solved_cases,
-        (SELECT COALESCE(current_streak, 0) FROM user_streaks us WHERE us.user_id = u.user_id LIMIT 1) AS streak
+        (SELECT COALESCE(current_streak, 0) FROM user_streaks us WHERE us.user_id = u.user_id LIMIT 1) AS streak,
+        -- Teacher Assignment count (for teachers)
+        (SELECT COUNT(*) FROM teacher_section_assignments tsa WHERE tsa.teacher_id = u.user_id AND tsa.is_archived = 0) AS teacher_assignments_count
       FROM users u
-      LEFT JOIN student_enrollments se ON se.user_id = u.user_id
-        AND se.semester_id = (SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1)
+      LEFT JOIN (
+        SELECT se1.*
+        FROM student_enrollments se1
+        JOIN (
+          SELECT user_id, MAX(enrollment_id) AS max_id
+          FROM student_enrollments
+          GROUP BY user_id
+        ) latest ON se1.enrollment_id = latest.max_id
+      ) se ON se.user_id = u.user_id
+      LEFT JOIN courses c ON c.course_id = se.course_id
       LEFT JOIN sections s ON s.section_id = se.section_id
+      LEFT JOIN semesters sem ON sem.semester_id = se.semester_id
       ORDER BY u.role_id ASC, u.total_points DESC, u.created_at DESC
     `);
 
@@ -225,11 +254,17 @@ router.get("/cases", async (req, res) => {
         c.case_id,
         c.title,
         c.description,
+        c.objectives,
         c.base_points,
         c.base_points AS points_reward,
         c.is_active,
         c.difficulty_id,
+        c.sql_type,
+        c.mode,
+        c.correct_query,
+        c.unlock_xp_required,
         d.difficulty_name,
+        (SELECT COUNT(*) FROM attempts a WHERE a.case_id = c.case_id) AS total_attempts,
         (SELECT COUNT(*) FROM attempts a WHERE a.case_id = c.case_id AND a.is_correct = 1) AS solved_count
       FROM cases c
       LEFT JOIN difficulty d ON c.difficulty_id = d.difficulty_id
@@ -265,34 +300,63 @@ router.put("/cases/:id/toggle", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
+// ⚡ Bulk Update Cases Status
+// PUT /api/admin/cases/bulk-status
+// ─────────────────────────────────────────────
+router.put("/cases/bulk-status", async (req, res) => {
+  try {
+    const { is_active, case_ids } = req.body;
+    const targetStatus = is_active ? 1 : 0;
+
+    if (Array.isArray(case_ids) && case_ids.length > 0) {
+      await systemDB.query(
+        `UPDATE cases SET is_active = ? WHERE case_id IN (${case_ids.map(() => '?').join(',')})`,
+        [targetStatus, ...case_ids]
+      );
+    } else {
+      await systemDB.query(`UPDATE cases SET is_active = ?`, [targetStatus]);
+    }
+
+    res.json({ message: `Successfully ${is_active ? 'enabled' : 'disabled'} cases` });
+  } catch (error) {
+    console.error("Bulk update cases error:", error);
+    res.status(500).json({ error: "Failed to bulk update cases" });
+  }
+});
+
+// ─────────────────────────────────────────────
 // 🏫 GET All Classrooms / Rooms Monitor
 // GET /api/admin/rooms
 // ─────────────────────────────────────────────
 router.get("/rooms", async (req, res) => {
   try {
-    // BUG-10 FIX: Exclude archived rooms from admin rooms list
-    const showArchived = req.query.archived === 'true' ? 1 : 0;
     const [rooms] = await systemDB.query(`
       SELECT 
         r.room_id,
         r.room_name,
         r.room_code,
-        r.is_archived,
+        COALESCE(r.is_archived, 0) AS is_archived,
         r.created_at,
-        u.full_name AS teacher_name,
-        u.email AS teacher_email,
+        u.full_name  AS teacher_name,
+        u.email      AS teacher_email,
         s.section_name,
         c.course_code,
         sem.school_year, sem.term,
-        (SELECT COUNT(*) FROM room_students rs WHERE rs.room_id = r.room_id AND rs.status = 'Approved') AS student_count
+        (SELECT COUNT(*) 
+           FROM room_students rs 
+           WHERE rs.room_id = r.room_id AND rs.status = 'Approved') AS student_count,
+        (SELECT COUNT(*) 
+           FROM game_sessions gs 
+           WHERE gs.room_id = r.room_id 
+             AND gs.status = 'Active' 
+             AND (gs.end_time > NOW() OR gs.is_paused = 1)) AS has_active_session
       FROM rooms r
-      LEFT JOIN users u ON r.teacher_id = u.user_id
-      LEFT JOIN sections s ON s.section_id = r.section_id
-      LEFT JOIN courses c ON c.course_id = r.course_id
+      LEFT JOIN users u   ON r.teacher_id   = u.user_id
+      LEFT JOIN sections s   ON s.section_id   = r.section_id
+      LEFT JOIN courses c    ON c.course_id    = r.course_id
       LEFT JOIN semesters sem ON sem.semester_id = r.semester_id
-      WHERE (r.is_archived = ? OR (? = 0 AND r.is_archived IS NULL))
-      ORDER BY r.created_at DESC
-    `, [showArchived, showArchived]);
+      ORDER BY has_active_session DESC, r.created_at DESC
+    `);
 
     res.json(rooms);
   } catch (error) {
@@ -301,8 +365,163 @@ router.get("/rooms", async (req, res) => {
   }
 });
 
+
 // ─────────────────────────────────────────────
-// 📢 System-Wide Broadcast Announcement
+// 🔒 ADMIN: Force-Archive a Room
+// POST /api/admin/rooms/:room_id/archive
+// ─────────────────────────────────────────────
+router.post("/rooms/:room_id/archive", async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    const [room] = await systemDB.query(`SELECT room_id FROM rooms WHERE room_id = ?`, [room_id]);
+    if (room.length === 0) return res.status(404).json({ error: "Room not found" });
+
+    // End any active game sessions
+    await systemDB.query(
+      `UPDATE game_sessions SET status = 'Ended', end_time = NOW()
+       WHERE room_id = ? AND status IN ('Active', 'Paused')`,
+      [room_id]
+    );
+    // Archive room
+    await systemDB.query(
+      `UPDATE rooms SET is_archived = 1, archived_at = NOW() WHERE room_id = ?`,
+      [room_id]
+    );
+
+    res.json({ message: "Room force-archived by admin" });
+  } catch (error) {
+    console.error("Admin archive room error:", error);
+    res.status(500).json({ error: "Failed to archive room" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🔒 ADMIN: Force-End Active Game in a Room
+// POST /api/admin/rooms/:room_id/end-game
+// ─────────────────────────────────────────────
+router.post("/rooms/:room_id/end-game", async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    await systemDB.query(
+      `UPDATE game_sessions SET status = 'Ended', end_time = NOW()
+       WHERE room_id = ? AND status = 'Active'`,
+      [room_id]
+    );
+    res.json({ message: "Active game ended by admin" });
+  } catch (error) {
+    console.error("Admin end-game error:", error);
+    res.status(500).json({ error: "Failed to end game" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🔒 ADMIN: Permanently Delete a Room
+// DELETE /api/admin/rooms/:room_id
+// ─────────────────────────────────────────────
+router.delete("/rooms/:room_id", async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    const [room] = await systemDB.query(`SELECT room_id FROM rooms WHERE room_id = ?`, [room_id]);
+    if (room.length === 0) return res.status(404).json({ error: "Room not found" });
+
+    const [sessions] = await systemDB.query(
+      `SELECT session_id FROM game_sessions WHERE room_id = ?`, [room_id]
+    );
+    const sessionIds = sessions.map(s => s.session_id);
+    if (sessionIds.length > 0) {
+      await systemDB.query(`DELETE FROM session_objectives WHERE session_id IN (?)`, [sessionIds]);
+    }
+    await systemDB.query(`DELETE FROM attempts WHERE room_id = ?`, [room_id]);
+    await systemDB.query(`DELETE FROM game_sessions WHERE room_id = ?`, [room_id]);
+    await systemDB.query(`DELETE FROM room_students WHERE room_id = ?`, [room_id]);
+    await systemDB.query(`DELETE FROM rooms WHERE room_id = ?`, [room_id]);
+
+    res.json({ message: "Room permanently deleted by admin" });
+  } catch (error) {
+    console.error("Admin delete room error:", error);
+    res.status(500).json({ error: "Failed to delete room" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🔒 ADMIN: Get Students in a Room
+// GET /api/admin/rooms/:room_id/students
+// ─────────────────────────────────────────────
+router.get("/rooms/:room_id/students", async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    const [students] = await systemDB.query(
+      `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id, rs.status
+       FROM room_students rs
+       JOIN users u ON rs.student_id = u.user_id
+       WHERE rs.room_id = ?
+       ORDER BY u.full_name ASC`,
+      [room_id]
+    );
+    res.json(students);
+  } catch (error) {
+    console.error("Admin get room students error:", error);
+    res.status(500).json({ error: "Failed to fetch students" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🔒 ADMIN: Get Room Leaderboard
+// GET /api/admin/rooms/:room_id/leaderboard
+// ─────────────────────────────────────────────
+router.get("/rooms/:room_id/leaderboard", async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    const [rows] = await systemDB.query(
+      `SELECT
+         u.user_id, u.full_name, u.student_id,
+         COALESCE(SUM(a.score_awarded), 0)            AS total_score,
+         COUNT(CASE WHEN a.is_correct = 1 THEN 1 END) AS correct_answers,
+         COUNT(a.attempt_id)                          AS total_attempts,
+         MAX(a.attempt_date)                          AS last_attempt
+       FROM room_students rs
+       JOIN users u ON rs.student_id = u.user_id
+       LEFT JOIN attempts a ON a.user_id = u.user_id AND a.room_id = ?
+       WHERE rs.room_id = ? AND rs.status = 'Approved'
+       GROUP BY u.user_id, u.full_name, u.student_id
+       ORDER BY total_score DESC, correct_answers DESC`,
+      [room_id, room_id]
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error("Admin leaderboard error:", error);
+    res.status(500).json({ error: "Failed to fetch leaderboard" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🔒 ADMIN: Get Room Session Logs
+// GET /api/admin/rooms/:room_id/sessions
+// ─────────────────────────────────────────────
+router.get("/rooms/:room_id/sessions", async (req, res) => {
+  try {
+    const { room_id } = req.params;
+    const [sessions] = await systemDB.query(
+      `SELECT
+         gs.session_id, gs.status, gs.created_at, gs.end_time,
+         c.title AS case_title,
+         (SELECT COUNT(DISTINCT a.user_id) FROM attempts a WHERE a.room_id = gs.room_id AND a.session_id = gs.session_id) AS participants,
+         (SELECT COUNT(*) FROM attempts a WHERE a.room_id = gs.room_id AND a.session_id = gs.session_id AND a.is_correct = 1) AS correct_total
+       FROM game_sessions gs
+       LEFT JOIN cases c ON gs.case_id = c.case_id
+       WHERE gs.room_id = ?
+       ORDER BY gs.created_at DESC
+       LIMIT 20`,
+      [room_id]
+    );
+    res.json(sessions);
+  } catch (error) {
+    console.error("Admin session logs error:", error);
+    res.status(500).json({ error: "Failed to fetch sessions" });
+  }
+});
+
+
 // POST /api/admin/broadcast
 // Body: { message: string, target_role?: number, notification_type?: string }
 // ─────────────────────────────────────────────
@@ -588,6 +807,23 @@ router.put("/users/:id/section", async (req, res) => {
       [formattedSection, userId]
     );
 
+    // If section exists in sections table, also update/link in student_enrollments
+    if (formattedSection) {
+      const [secRows] = await systemDB.query("SELECT section_id FROM sections WHERE section_name = ? AND is_archived = 0 LIMIT 1", [formattedSection]);
+      if (secRows.length > 0) {
+        const sectionId = secRows[0].section_id;
+        const [[activeSem]] = await systemDB.query("SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1");
+        if (activeSem) {
+          const [existing] = await systemDB.query("SELECT enrollment_id FROM student_enrollments WHERE user_id = ? AND semester_id = ? LIMIT 1", [userId, activeSem.semester_id]);
+          if (existing.length > 0) {
+            await systemDB.query("UPDATE student_enrollments SET section_id = ? WHERE enrollment_id = ?", [sectionId, existing[0].enrollment_id]);
+          } else {
+            await systemDB.query("INSERT INTO student_enrollments (user_id, section_id, semester_id, created_at) VALUES (?, ?, ?, NOW())", [userId, sectionId, activeSem.semester_id]);
+          }
+        }
+      }
+    }
+
     // Notify user
     try {
       await systemDB.query(
@@ -610,6 +846,203 @@ router.put("/users/:id/section", async (req, res) => {
   } catch (error) {
     console.error("Admin update section error:", error);
     res.status(500).json({ error: "Failed to update section" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🎓 Comprehensive Academic Alignment Update
+// PUT /api/admin/users/:id/academic
+// Body: { course_id, section_id, year_level, semester_id, student_id, teacher_id }
+// ─────────────────────────────────────────────
+router.put("/users/:id/academic", async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    const { course_id, section_id, year_level, semester_id, student_id, teacher_id } = req.body;
+
+    const [userRows] = await systemDB.query("SELECT role_id, full_name, email FROM users WHERE user_id = ?", [userId]);
+    if (!userRows.length) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const user = userRows[0];
+
+    // If teacher, update teacher_id
+    if (user.role_id === 2) {
+      const formattedTeacherId = teacher_id ? String(teacher_id).trim() : null;
+      await systemDB.query("UPDATE users SET teacher_id = ? WHERE user_id = ?", [formattedTeacherId, userId]);
+      return res.json({ message: `Teacher ID updated for ${user.full_name}`, success: true });
+    }
+
+    // For students:
+    const formattedStudentId = student_id ? String(student_id).trim() : null;
+
+    // Get section name to keep legacy users.section in sync
+    let sectionName = null;
+    if (section_id) {
+      const [[sec]] = await systemDB.query("SELECT section_name FROM sections WHERE section_id = ?", [section_id]);
+      if (sec) sectionName = sec.section_name;
+    }
+
+    // Determine target semester (use passed semester_id or active semester)
+    let targetSemesterId = semester_id ? Number(semester_id) : null;
+    if (!targetSemesterId) {
+      const [[activeSem]] = await systemDB.query("SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1");
+      if (activeSem) targetSemesterId = activeSem.semester_id;
+    }
+
+    // Update users table for fast lookup / backward compatibility
+    await systemDB.query(
+      "UPDATE users SET student_id = ?, section = COALESCE(?, section) WHERE user_id = ?",
+      [formattedStudentId, sectionName, userId]
+    );
+
+    // Upsert into student_enrollments if semester and any academic fields exist
+    if (targetSemesterId && (section_id || course_id || year_level)) {
+      const [existing] = await systemDB.query(
+        "SELECT enrollment_id FROM student_enrollments WHERE user_id = ? AND semester_id = ? LIMIT 1",
+        [userId, targetSemesterId]
+      );
+
+      if (existing.length > 0) {
+        await systemDB.query(
+          `UPDATE student_enrollments 
+           SET course_id = ?, section_id = ?, year_level = ?
+           WHERE enrollment_id = ?`,
+          [
+            course_id ? Number(course_id) : null,
+            section_id ? Number(section_id) : null,
+            year_level ? Number(year_level) : null,
+            existing[0].enrollment_id
+          ]
+        );
+      } else {
+        await systemDB.query(
+          `INSERT INTO student_enrollments (user_id, course_id, section_id, year_level, semester_id, created_at)
+           VALUES (?, ?, ?, ?, ?, NOW())`,
+          [
+            userId,
+            course_id ? Number(course_id) : null,
+            section_id ? Number(section_id) : null,
+            year_level ? Number(year_level) : null,
+            targetSemesterId
+          ]
+        );
+      }
+    }
+
+    // Notify user of update
+    try {
+      await systemDB.query(
+        "INSERT INTO notifications (user_id, sender_id, message, is_read, notification_type) VALUES (?, ?, ?, 0, ?)",
+        [
+          userId,
+          req.user?.user_id || 1,
+          `Your academic profile has been aligned by Administrator.`,
+          'announcement'
+        ]
+      );
+    } catch (_) {}
+
+    res.json({ message: `Academic profile updated successfully for ${user.full_name}`, success: true });
+  } catch (error) {
+    console.error("Admin update academic error:", error);
+    res.status(500).json({ error: error.message || "Failed to update academic profile" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 👤 Edit User Personal Profile (Demographics)
+// PUT /api/admin/users/:id/profile
+// ─────────────────────────────────────────────
+router.put("/users/:id/profile", async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    const { first_name, middle_name, last_name, extension_name, email, gender, sex, civil_status, birthday } = req.body;
+
+    if (!first_name || !last_name || !email) {
+      return res.status(400).json({ error: "First name, last name, and email are required" });
+    }
+
+    // Check email uniqueness
+    const [existingEmail] = await systemDB.query(
+      "SELECT user_id FROM users WHERE email = ? AND user_id != ?",
+      [email.trim().toLowerCase(), userId]
+    );
+    if (existingEmail.length > 0) {
+      return res.status(400).json({ error: "Email is already in use by another account" });
+    }
+
+    const fullName = [first_name.trim(), middle_name?.trim(), last_name.trim(), extension_name?.trim()].filter(Boolean).join(" ");
+
+    await systemDB.query(
+      `UPDATE users SET 
+        first_name = ?,
+        middle_name = ?,
+        last_name = ?,
+        extension_name = ?,
+        full_name = ?,
+        email = ?,
+        gender = ?,
+        sex = ?,
+        civil_status = ?,
+        birthday = ?
+       WHERE user_id = ?`,
+      [
+        first_name.trim(),
+        middle_name ? middle_name.trim() : null,
+        last_name.trim(),
+        extension_name ? extension_name.trim() : null,
+        fullName,
+        email.trim().toLowerCase(),
+        gender || null,
+        sex || null,
+        civil_status || null,
+        birthday || null,
+        userId
+      ]
+    );
+
+    res.json({ message: "User profile updated successfully", success: true });
+  } catch (error) {
+    console.error("Admin update profile error:", error);
+    res.status(500).json({ error: error.message || "Failed to update user profile" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 🧑‍🏫 GET Teacher Assigned Classes
+// GET /api/admin/users/:id/teacher-assignments
+// ─────────────────────────────────────────────
+router.get("/users/:id/teacher-assignments", async (req, res) => {
+  try {
+    const teacherId = Number(req.params.id);
+    const [assignments] = await systemDB.query(
+      `SELECT 
+        tsa.assignment_id,
+        tsa.teacher_id,
+        tsa.section_id,
+        s.section_name,
+        tsa.course_id,
+        c.course_code,
+        c.course_name,
+        tsa.year_level,
+        tsa.semester_id,
+        sem.school_year,
+        sem.term,
+        tsa.subject_name,
+        tsa.created_at,
+        tsa.is_archived
+       FROM teacher_section_assignments tsa
+       LEFT JOIN sections s ON s.section_id = tsa.section_id
+       LEFT JOIN courses c ON c.course_id = tsa.course_id
+       LEFT JOIN semesters sem ON sem.semester_id = tsa.semester_id
+       WHERE tsa.teacher_id = ?
+       ORDER BY tsa.is_archived ASC, tsa.created_at DESC`,
+      [teacherId]
+    );
+    res.json(assignments);
+  } catch (error) {
+    console.error("Admin fetch teacher assignments error:", error);
+    res.status(500).json({ error: "Failed to fetch teacher assignments" });
   }
 });
 

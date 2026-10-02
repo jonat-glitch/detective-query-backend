@@ -24,6 +24,8 @@ const progressRoutes = require("./routes/progressRoutes");
 const difficultyProgressRoutes = require("./routes/difficultyProgressRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const adminSetupRoutes = require("./routes/adminSetupRoutes");
+const adminImportRoutes = require("./routes/adminImportRoutes");
+const inviteRoutes = require("./routes/inviteRoutes");
 const roomRoutes = require('./routes/roomRoutes');
 
 // ✅ FIXED (CASE SENSITIVE IMPORT)
@@ -81,9 +83,13 @@ app.use('/api/difficulty-progress', difficultyProgressRoutes);
 // ADMIN
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/setup', adminSetupRoutes);
+app.use('/api/admin/import', adminImportRoutes);
+
+// INVITATIONS & ONBOARDING
+app.use('/api/invite', inviteRoutes);
 
 // ROOMS
-app.use("/api/rooms", require("./routes/roomRoutes"));
+app.use("/api/rooms", roomRoutes);
 
 // NOTIFICATIONS
 app.use('/api', notificationRoutes);

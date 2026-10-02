@@ -1508,7 +1508,9 @@ router.get('/students/:room_id',
             }
 
             const [students] = await systemDB.query(
-                `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id
+                `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id, u.section,
+                         COALESCE(u.total_points, 0) AS total_points,
+                         COALESCE(u.current_level, 1) AS current_level
                  FROM room_students rs
                  JOIN users u ON rs.student_id = u.user_id
                  WHERE rs.room_id = ?
