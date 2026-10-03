@@ -11,9 +11,11 @@ const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 const { setOtp, verifyOtp } = require('../utils/otpStore');
+const { validate } = require('../middleware/validate');
+const { authSchemas } = require('../validators/schemas');
 
 // ================= SEND EMAIL VERIFICATION CODE (OTP) =================
-router.post('/send-otp', async (req, res) => {
+router.post('/send-otp', validate(authSchemas.sendOtp), async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) {
@@ -80,7 +82,7 @@ router.post('/send-otp', async (req, res) => {
 // ================= PUBLIC: VALIDATE CLASS CODE =================
 // POST /validate-class-code
 // Returns: { valid: bool, section_id, section_name, course_id, course_code, year_level, semester_id }
-router.post('/validate-class-code', async (req, res) => {
+router.post('/validate-class-code', validate(authSchemas.validateClassCode), async (req, res) => {
     try {
         const { code } = req.body;
         if (!code) return res.status(400).json({ error: 'Class code is required' });
@@ -132,7 +134,7 @@ router.post('/validate-class-code', async (req, res) => {
 // ================= PUBLIC: VALIDATE STUDENT NUMBER =================
 // POST /validate-student-number
 // Returns: { valid: bool, section_id, course_id, year_level, semester_id }
-router.post('/validate-student-number', async (req, res) => {
+router.post('/validate-student-number', validate(authSchemas.validateStudentNumber), async (req, res) => {
     try {
         const { student_number, section_id, semester_id } = req.body;
         if (!student_number) return res.status(400).json({ error: 'Student number is required' });
@@ -182,7 +184,7 @@ router.post('/validate-student-number', async (req, res) => {
 });
 
 // ================= REGISTER (gated: class code + student number + OTP + admin approval) =================
-router.post('/register', async (req, res) => {
+router.post('/register', validate(authSchemas.register), async (req, res) => {
     try {
         const {
             first_name,
@@ -330,7 +332,7 @@ router.post('/register', async (req, res) => {
 
 
 // ================= LOGIN =================
-router.post('/login', loginLimiter, async (req, res) => {
+router.post('/login', loginLimiter, validate(authSchemas.login), async (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {

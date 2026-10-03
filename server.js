@@ -33,6 +33,7 @@ const notificationRoutes = require("./routes/notificationRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
 const uploadRoutes = require('./routes/uploadRoutes');
 const practiceRoutes = require('./routes/practiceRoutes');
+const badgeRoutes = require('./routes/badgeRoutes');
 
 const app = express();
 
@@ -155,6 +156,9 @@ app.use('/api', uploadRoutes);
 
 // PRACTICE (DML / DDL)
 app.use('/api/practice', practiceRoutes);
+
+// BADGES
+app.use('/api/badges', badgeRoutes);
 
 /* ================= PROFILE (full — includes stats, achievements, streak) ================= */
 app.get('/api/profile', authenticateToken, async (req, res) => {
@@ -285,6 +289,12 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
             [userId]
         );
 
+        // 8. Persistent Badges from user_badges
+        const [badgeRows] = await systemDB.query(
+            `SELECT badge_id, unlocked_at FROM user_badges WHERE user_id = ? ORDER BY unlocked_at ASC`,
+            [userId]
+        );
+
         res.json({
             ...user,
             streak,
@@ -299,7 +309,9 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
             },
             sqlProgress,
             recentActivity: activityRows || [],
-            achievements: achievementRows || []
+            achievements: achievementRows || [],
+            badges: badgeRows || [],
+            unlocked_badge_ids: (badgeRows || []).map(b => b.badge_id)
         });
 
     } catch (err) {

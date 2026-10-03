@@ -3,6 +3,8 @@ const { systemDB } = require('../db');
 const { authenticateToken, authorizeRole } = require('../middleware/auth');
 const submissionService = require('../services/submissionService');
 const bcrypt = require('bcryptjs');
+const { validate } = require('../middleware/validate');
+const { authSchemas } = require('../validators/schemas');
 
 const router = express.Router();
 
@@ -225,7 +227,7 @@ router.put('/change-name', authenticateToken, async (req, res) => {
     }
 });
 // 🔒 Change Password (verify old password first)
-router.put('/change-password', authenticateToken, async (req, res) => {
+router.put('/change-password', authenticateToken, validate(authSchemas.changePassword), async (req, res) => {
     try {
         const userId = req.user.user_id;
         const { oldPassword, newPassword } = req.body;
