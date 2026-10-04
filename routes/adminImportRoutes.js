@@ -17,6 +17,8 @@ const { parse: parseCsvSync } = require('csv-parse/sync');
 const { systemDB }         = require('../db');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const { sendStudentInvitationEmail } = require('../services/emailService');
+const { generateStudentGuide, generateTeacherGuide } = require('../services/guideService');
+
 
 const router = express.Router();
 
@@ -80,6 +82,30 @@ router.get('/template', async (req, res) => {
   } catch (err) {
     console.error('Error generating template:', err);
     res.status(500).json({ error: 'Failed to generate template' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/import/guide/:role
+// Download generated Student or Teacher Guide PDF directly in browser
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/guide/:role', async (req, res) => {
+  try {
+    const role = (req.params.role || '').toLowerCase();
+    let buf, filename;
+    if (role === 'teacher' || role === 'instructor') {
+      buf = await generateTeacherGuide();
+      filename = 'Detective_Query_Teacher_Guide.pdf';
+    } else {
+      buf = await generateStudentGuide();
+      filename = 'Detective_Query_Student_Guide.pdf';
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
+  } catch (err) {
+    console.error('Error generating guide download:', err);
+    res.status(500).json({ error: 'Failed to generate guide PDF' });
   }
 });
 
@@ -215,6 +241,20 @@ router.post('/csv', upload.single('file'), async (req, res) => {
 
   const results = { success: [], skipped: [], errors: [] };
 
+  // Pre-generate both guide PDFs once for this entire import batch
+  let studentGuideBuf = null;
+  let teacherGuideBuf = null;
+  try {
+    [studentGuideBuf, teacherGuideBuf] = await Promise.all([
+      generateStudentGuide(),
+      generateTeacherGuide(),
+    ]);
+    console.log('[Import] Guides generated — student:', studentGuideBuf.length, 'bytes, teacher:', teacherGuideBuf.length, 'bytes');
+  } catch (guideErr) {
+    console.warn('[Import] Guide generation failed (emails will send without attachment):', guideErr.message);
+  }
+
+
   for (const rawRow of rows) {
     const row = normalizeRow(rawRow);
 
@@ -280,6 +320,7 @@ router.post('/csv', upload.single('file'), async (req, res) => {
       // Send invitation email (fire and continue even if one fails)
       try {
         const displayName = [row.first_name, row.last_name].filter(Boolean).join(' ') || email;
+        const guideBuffer = role_id === 2 ? teacherGuideBuf : studentGuideBuf;
         await sendStudentInvitationEmail({
           to:          email,
           fullName:    displayName,
@@ -289,7 +330,9 @@ router.post('/csv', upload.single('file'), async (req, res) => {
           course_code: row.course_code,
           year_level,
           label,
+          guideBuffer,
         });
+
         results.success.push({ email, name: displayName });
       } catch (mailErr) {
         console.error(`[Import] Email failed for ${email}:`, mailErr.message);
@@ -394,10 +437,17 @@ router.post('/resend/:invitationId', async (req, res) => {
     );
 
     const displayName = [inv.first_name, inv.last_name].filter(Boolean).join(' ') || inv.email;
+    let guideBuffer = null;
+    try {
+      guideBuffer = await generateStudentGuide();
+    } catch (e) {
+      console.warn('[Resend Invite] Guide generation error:', e.message);
+    }
     await sendStudentInvitationEmail({
-      to:       inv.email,
-      fullName: displayName,
-      token:    newToken,
+      to:          inv.email,
+      fullName:    displayName,
+      token:       newToken,
+      guideBuffer,
     });
 
     res.json({ message: `Invite resent to ${inv.email}` });
@@ -420,6 +470,13 @@ router.post('/resend-batch/:batchId', async (req, res) => {
     );
     if (!pending.length) return res.json({ message: 'No pending invitations to resend', count: 0 });
 
+    let studentGuideBuf = null;
+    try {
+      studentGuideBuf = await generateStudentGuide();
+    } catch (e) {
+      console.warn('[Resend Batch] Guide generation error:', e.message);
+    }
+
     let sent = 0, failed = 0;
     for (const inv of pending) {
       const newToken  = crypto.randomBytes(48).toString('hex');
@@ -432,7 +489,12 @@ router.post('/resend-batch/:batchId', async (req, res) => {
       );
       try {
         const displayName = [inv.first_name, inv.last_name].filter(Boolean).join(' ') || inv.email;
-        await sendStudentInvitationEmail({ to: inv.email, fullName: displayName, token: newToken });
+        await sendStudentInvitationEmail({
+          to:          inv.email,
+          fullName:    displayName,
+          token:       newToken,
+          guideBuffer: studentGuideBuf,
+        });
         sent++;
       } catch {
         failed++;

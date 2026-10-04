@@ -13,7 +13,27 @@ const SENDER = {
 /**
  * Generic helper to send email via Brevo REST API
  */
-async function sendViaBrevo({ to, subject, htmlContent }) {
+/**
+ * @param {Object} opts
+ * @param {string} opts.to
+ * @param {string} opts.subject
+ * @param {string} opts.htmlContent
+ * @param {Array<{name:string, content:string, type:string}>} [opts.attachments]
+ *   Each attachment: { name: 'guide.pdf', content: '<base64>', type: 'application/pdf' }
+ */
+async function sendViaBrevo({ to, subject, htmlContent, attachments }) {
+  const payload = {
+    sender: SENDER,
+    to: [{ email: to }],
+    subject,
+    htmlContent,
+  };
+
+  // Brevo supports attachments as an array of { name, content (base64), type }
+  if (attachments && attachments.length > 0) {
+    payload.attachment = attachments;
+  }
+
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
@@ -21,12 +41,7 @@ async function sendViaBrevo({ to, subject, htmlContent }) {
       'api-key': BREVO_API_KEY,
       'content-type': 'application/json'
     },
-    body: JSON.stringify({
-      sender: SENDER,
-      to: [{ email: to }],
-      subject,
-      htmlContent
-    })
+    body: JSON.stringify(payload)
   });
 
   const data = await response.json();
@@ -355,7 +370,10 @@ async function sendAccountChangeRejectedEmail({ to, fullName, requestType, reaso
 // 🎓 Send private student/teacher invitation email (CSV import flow)
 // Contains a unique setup link — NOT public registration
 // ───────────────────────────────────────────────────────────────
-async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, section, course_code, year_level, label }) {
+/**
+ * @param {Buffer|null} [guideBuffer] - Pre-generated PDF guide buffer to attach
+ */
+async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, section, course_code, year_level, label, guideBuffer }) {
   const isTeacher   = role_id === 2;
   const setupUrl    = `${process.env.FRONTEND_URL || 'https://detective-query.vercel.app'}/setup?token=${token}`;
   const roleLabel   = isTeacher ? 'Instructor' : 'Student';
@@ -366,6 +384,19 @@ async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, se
     section     && `<div class="info-row"><span class="info-label">Section</span><span class="info-value">${section}</span></div>`,
     year_level  && `<div class="info-row"><span class="info-label">Year Level</span><span class="info-value">${year_level}</span></div>`,
   ].filter(Boolean).join('');
+
+  // Build attachments array if a guide buffer was provided
+  const attachments = [];
+  if (guideBuffer && Buffer.isBuffer(guideBuffer)) {
+    const guideFilename = isTeacher
+      ? 'Detective_Query_Teacher_Guide.pdf'
+      : 'Detective_Query_Student_Guide.pdf';
+    attachments.push({
+      name: guideFilename,
+      content: guideBuffer.toString('base64'),
+      type: 'application/pdf',
+    });
+  }
 
   await sendViaBrevo({
     to,
@@ -423,6 +454,16 @@ async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, se
             </div>
             <a class="cta-btn" href="${setupUrl}" target="_blank" rel="noopener noreferrer">🔐 SETUP MY ACCOUNT</a>
             <div class="warning-box">⚠️ This link is <strong>private and unique to you</strong>. Do not share it. It expires in <strong>7 days</strong>.</div>
+            ${attachments.length > 0 ? `
+            <div style="background: rgba(0,240,255,0.06); border: 1px dashed ${accentColor}; border-radius: 10px; padding: 16px; margin: 20px 0; text-align: left;">
+              <div style="font-size: 13px; font-weight: 700; color: ${accentColor}; margin-bottom: 6px;">
+                📎 ATTACHED: COMPLETE ${roleLabel.toUpperCase()} USER GUIDE &amp; TUTORIAL (PDF)
+              </div>
+              <p style="font-size: 12.5px; color: #cbd5e1; margin: 0; line-height: 1.5;">
+                We have attached the official <strong>${isTeacher ? 'Detective_Query_Teacher_Guide.pdf' : 'Detective_Query_Student_Guide.pdf'}</strong> to this email. It includes a complete step-by-step walkthrough covering your dashboard, classroom rooms, practice and rank modes, DQL lab, workshop, and tips!
+              </p>
+            </div>
+            ` : ''}
             <p style="font-size:12px;color:#475569;margin-top:16px;">If the button doesn't work, copy: <a href="${setupUrl}" style="color:${accentColor};word-break:break-all;">${setupUrl}</a></p>
           </div>
           <div class="footer">
@@ -432,6 +473,7 @@ async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, se
       </body>
       </html>
     `,
+    attachments,
   });
   console.log(`[EmailService] Invitation email sent to ${to}`);
 }
