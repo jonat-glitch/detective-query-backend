@@ -156,15 +156,24 @@ async function generateStudentGuide() {
   doc.fontSize(10).font('Helvetica').fillColor(hex(C.bodyText))
      .text('Detective Query is an interactive SQL learning platform where you solve real database mysteries.\nThis guide walks you through every feature so you can hit the ground running from day one.',
            70,230,{width:W-140,align:'center',lineGap:3});
-  const tocY=296;
-  doc.save().rect(60,tocY,W-120,200).fillOpacity(0.05).fill(hex(C.white)).restore();
-  doc.rect(60,tocY,W-120,200).strokeColor(hex(C.accent)).strokeOpacity(0.15).lineWidth(1).stroke();
-  doc.fontSize(9.5).font('Helvetica-Bold').fillColor(hex(C.accent)).text('TABLE OF CONTENTS',80,tocY+14);
-  [['1.','Logging In & Account Setup'],['2.','Your Dashboard'],['3.','Joining a Room'],['4.','Practice Mode'],
-   ['5.','Rank Mode'],['6.','DQL Lab'],['7.','SQL Workshop'],['8.','Profile & Progress'],['9.','Tips & FAQ']]
-  .forEach(function(item,i){
-    doc.fontSize(9.5).font('Helvetica-Bold').fillColor(hex(C.accent)).text(item[0]+' ',80,tocY+38+i*17,{continued:true,width:20});
-    doc.font('Helvetica').fillColor(hex(C.white)).text(item[1],{width:W-180});
+  const tocY = 296;
+  doc.save().roundedRect(60, tocY, W - 120, 206, 8).fillOpacity(0.05).fill(hex(C.white)).restore();
+  doc.roundedRect(60, tocY, W - 120, 206, 8).strokeColor(hex(C.accent)).strokeOpacity(0.2).lineWidth(1).stroke();
+  doc.fontSize(10).font('Helvetica-Bold').fillColor(hex(C.accent)).text('TABLE OF CONTENTS', 85, tocY + 16);
+  [
+    ['1.', 'Logging In & Account Setup'],
+    ['2.', 'Your Dashboard'],
+    ['3.', 'Joining a Room'],
+    ['4.', 'Practice Mode'],
+    ['5.', 'Rank Mode'],
+    ['6.', 'DQL Lab'],
+    ['7.', 'SQL Workshop'],
+    ['8.', 'Profile & Progress'],
+    ['9.', 'Tips & FAQ']
+  ].forEach(function(item, i) {
+    const itemY = tocY + 38 + i * 17;
+    doc.fontSize(9.5).font('Helvetica-Bold').fillColor(hex(C.accent)).text(item[0], 85, itemY);
+    doc.fontSize(9.5).font('Helvetica').fillColor(hex(C.white)).text(item[1], 115, itemY, { width: W - 200 });
   });
   doc.fontSize(8).font('Helvetica').fillColor(hex(C.muted)).text('For enrolled students only. Do not redistribute.',0,H-36,{align:'center'});
 
@@ -307,16 +316,25 @@ async function generateTeacherGuide() {
   doc.fontSize(12).font('Helvetica-Bold').fillColor(hex(C.white)).text('Welcome, Instructor!',0,210,{align:'center'});
   doc.fontSize(10).font('Helvetica').fillColor(hex(C.bodyText))
      .text('Detective Query gives you complete control over your students learning journey.\nCreate rooms, assign cases, run competitions, track analytics, and manage your classroom\nall from a single, intuitive dashboard.',70,230,{width:W-140,align:'center',lineGap:3});
-  const tocY=296;
-  doc.save().rect(60,tocY,W-120,218).fillOpacity(0.05).fill(hex(C.white)).restore();
-  doc.rect(60,tocY,W-120,218).strokeColor(hex(AC)).strokeOpacity(0.2).lineWidth(1).stroke();
-  doc.fontSize(9.5).font('Helvetica-Bold').fillColor(hex(AC)).text('TABLE OF CONTENTS',80,tocY+14);
-  [['1.','Account Setup & First Login'],['2.','Teacher Dashboard Overview'],['3.','Creating & Managing Rooms'],
-   ['4.','Setting Up Cases & Difficulties'],['5.','Running Rank Mode Sessions'],['6.','Progress & Analytics'],
-   ['7.','Student Management'],['8.','Notifications & Communication'],['9.','CSV Import — Bulk Enrollment'],['10.','Tips & FAQ']]
-  .forEach(function(item,i){
-    doc.fontSize(9.5).font('Helvetica-Bold').fillColor(hex(AC)).text(item[0]+' ',80,tocY+38+i*17,{continued:true,width:24});
-    doc.font('Helvetica').fillColor(hex(C.white)).text(item[1],{width:W-184});
+  const tocY = 296;
+  doc.save().roundedRect(60, tocY, W - 120, 226, 8).fillOpacity(0.05).fill(hex(C.white)).restore();
+  doc.roundedRect(60, tocY, W - 120, 226, 8).strokeColor(hex(AC)).strokeOpacity(0.25).lineWidth(1).stroke();
+  doc.fontSize(10).font('Helvetica-Bold').fillColor(hex(AC)).text('TABLE OF CONTENTS', 85, tocY + 16);
+  [
+    ['1.', 'Account Setup & First Login'],
+    ['2.', 'Teacher Dashboard Overview'],
+    ['3.', 'Creating & Managing Rooms'],
+    ['4.', 'Setting Up Cases & Difficulties'],
+    ['5.', 'Running Rank Mode Sessions'],
+    ['6.', 'Progress & Analytics'],
+    ['7.', 'Student Management'],
+    ['8.', 'Notifications & Communication'],
+    ['9.', 'CSV Import — Bulk Enrollment'],
+    ['10.', 'Tips & FAQ']
+  ].forEach(function(item, i) {
+    const itemY = tocY + 38 + i * 17;
+    doc.fontSize(9.5).font('Helvetica-Bold').fillColor(hex(AC)).text(item[0], 85, itemY);
+    doc.fontSize(9.5).font('Helvetica').fillColor(hex(C.white)).text(item[1], 115, itemY, { width: W - 200 });
   });
   doc.fontSize(8).font('Helvetica').fillColor(hex(C.muted)).text('Instructor Guide. For authorized teaching staff only.',0,H-36,{align:'center'});
 
