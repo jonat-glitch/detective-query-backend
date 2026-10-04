@@ -241,19 +241,6 @@ router.post('/csv', upload.single('file'), async (req, res) => {
 
   const results = { success: [], skipped: [], errors: [] };
 
-  // Pre-generate both guide PDFs once for this entire import batch
-  let studentGuideBuf = null;
-  let teacherGuideBuf = null;
-  try {
-    [studentGuideBuf, teacherGuideBuf] = await Promise.all([
-      generateStudentGuide(),
-      generateTeacherGuide(),
-    ]);
-    console.log('[Import] Guides generated — student:', studentGuideBuf.length, 'bytes, teacher:', teacherGuideBuf.length, 'bytes');
-  } catch (guideErr) {
-    console.warn('[Import] Guide generation failed (emails will send without attachment):', guideErr.message);
-  }
-
 
   for (const rawRow of rows) {
     const row = normalizeRow(rawRow);
@@ -320,7 +307,6 @@ router.post('/csv', upload.single('file'), async (req, res) => {
       // Send invitation email (fire and continue even if one fails)
       try {
         const displayName = [row.first_name, row.last_name].filter(Boolean).join(' ') || email;
-        const guideBuffer = role_id === 2 ? teacherGuideBuf : studentGuideBuf;
         await sendStudentInvitationEmail({
           to:          email,
           fullName:    displayName,
@@ -330,7 +316,6 @@ router.post('/csv', upload.single('file'), async (req, res) => {
           course_code: row.course_code,
           year_level,
           label,
-          guideBuffer,
         });
 
         results.success.push({ email, name: displayName });
@@ -437,17 +422,10 @@ router.post('/resend/:invitationId', async (req, res) => {
     );
 
     const displayName = [inv.first_name, inv.last_name].filter(Boolean).join(' ') || inv.email;
-    let guideBuffer = null;
-    try {
-      guideBuffer = await generateStudentGuide();
-    } catch (e) {
-      console.warn('[Resend Invite] Guide generation error:', e.message);
-    }
     await sendStudentInvitationEmail({
       to:          inv.email,
       fullName:    displayName,
       token:       newToken,
-      guideBuffer,
     });
 
     res.json({ message: `Invite resent to ${inv.email}` });
@@ -470,13 +448,6 @@ router.post('/resend-batch/:batchId', async (req, res) => {
     );
     if (!pending.length) return res.json({ message: 'No pending invitations to resend', count: 0 });
 
-    let studentGuideBuf = null;
-    try {
-      studentGuideBuf = await generateStudentGuide();
-    } catch (e) {
-      console.warn('[Resend Batch] Guide generation error:', e.message);
-    }
-
     let sent = 0, failed = 0;
     for (const inv of pending) {
       const newToken  = crypto.randomBytes(48).toString('hex');
@@ -493,7 +464,6 @@ router.post('/resend-batch/:batchId', async (req, res) => {
           to:          inv.email,
           fullName:    displayName,
           token:       newToken,
-          guideBuffer: studentGuideBuf,
         });
         sent++;
       } catch {

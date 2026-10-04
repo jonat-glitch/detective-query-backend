@@ -385,18 +385,11 @@ async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, se
     year_level  && `<div class="info-row"><span class="info-label">Year Level</span><span class="info-value">${year_level}</span></div>`,
   ].filter(Boolean).join('');
 
-  // Build attachments array if a guide buffer was provided
-  const attachments = [];
-  if (guideBuffer && Buffer.isBuffer(guideBuffer)) {
-    const guideFilename = isTeacher
-      ? 'Detective_Query_Teacher_Guide.pdf'
-      : 'Detective_Query_Student_Guide.pdf';
-    attachments.push({
-      name: guideFilename,
-      content: guideBuffer.toString('base64'),
-      type: 'application/pdf',
-    });
-  }
+  const guideFilename = isTeacher
+    ? 'Detective_Query_Teacher_Guide.pdf'
+    : 'Detective_Query_Student_Guide.pdf';
+  const guideDownloadUrl = `${process.env.BACKEND_URL || 'https://detective-query-backend.onrender.com'}/api/admin/import/guide/${isTeacher ? 'teacher' : 'student'}`;
+  const guidePageCount = isTeacher ? '12 Pages' : '10 Pages';
 
   await sendViaBrevo({
     to,
@@ -454,16 +447,34 @@ async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, se
             </div>
             <a class="cta-btn" href="${setupUrl}" target="_blank" rel="noopener noreferrer">🔐 SETUP MY ACCOUNT</a>
             <div class="warning-box">⚠️ This link is <strong>private and unique to you</strong>. Do not share it. It expires in <strong>7 days</strong>.</div>
-            ${attachments.length > 0 ? `
-            <div style="background: rgba(0,240,255,0.06); border: 1px dashed ${accentColor}; border-radius: 10px; padding: 16px; margin: 20px 0; text-align: left;">
-              <div style="font-size: 13px; font-weight: 700; color: ${accentColor}; margin-bottom: 6px;">
-                📎 ATTACHED: COMPLETE ${roleLabel.toUpperCase()} USER GUIDE &amp; TUTORIAL (PDF)
-              </div>
-              <p style="font-size: 12.5px; color: #cbd5e1; margin: 0; line-height: 1.5;">
-                We have attached the official <strong>${isTeacher ? 'Detective_Query_Teacher_Guide.pdf' : 'Detective_Query_Student_Guide.pdf'}</strong> to this email. It includes a complete step-by-step walkthrough covering your dashboard, classroom rooms, practice and rank modes, DQL lab, workshop, and tips!
-              </p>
+
+            <!-- 📄 EMBEDDED PDF GUIDE CARD (INSIDE DETECTIVE QUERY CONTAINER) -->
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid ${accentColor}44; border-radius: 12px; padding: 18px; margin: 24px 0 16px; text-align: left;">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td style="width: 36px; vertical-align: top; padding-right: 12px; font-size: 26px;">
+                    📄
+                  </td>
+                  <td style="vertical-align: top;">
+                    <div style="font-size: 10.5px; font-weight: 700; letter-spacing: 1.5px; color: ${accentColor}; text-transform: uppercase; margin-bottom: 4px;">
+                      OFFICIAL ${roleLabel.toUpperCase()} MANUAL &bull; ${guidePageCount}
+                    </div>
+                    <div style="font-size: 14px; font-weight: 800; color: #ffffff; margin-bottom: 4px;">
+                      ${guideFilename}
+                    </div>
+                    <div style="font-size: 12px; color: #94a3b8; line-height: 1.5; margin-bottom: 12px;">
+                      ${isTeacher 
+                        ? 'Includes full instructions on creating rooms, managing difficulty levels, launching live Rank Mode, and exporting student analytics.' 
+                        : 'Includes full walkthrough on Practice Mode, running queries, hint system, DQL Lab, SQL Workshop, and Rank Mode.'}
+                    </div>
+                    <a href="${guideDownloadUrl}" target="_blank" rel="noopener noreferrer" style="display: inline-block; background: ${accentColor}18; border: 1px solid ${accentColor}; color: ${accentColor} !important; font-weight: 700; font-size: 12px; padding: 8px 18px; border-radius: 6px; text-decoration: none; letter-spacing: 0.5px;">
+                      📥 Open &amp; Download Guide (PDF) &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
             </div>
-            ` : ''}
+
             <p style="font-size:12px;color:#475569;margin-top:16px;">If the button doesn't work, copy: <a href="${setupUrl}" style="color:${accentColor};word-break:break-all;">${setupUrl}</a></p>
           </div>
           <div class="footer">
@@ -473,7 +484,6 @@ async function sendStudentInvitationEmail({ to, fullName, token, role_id = 1, se
       </body>
       </html>
     `,
-    attachments,
   });
   console.log(`[EmailService] Invitation email sent to ${to}`);
 }
