@@ -82,9 +82,9 @@ app.use('/api/progress', progressRoutes);
 app.use('/api/difficulty-progress', difficultyProgressRoutes);
 
 // ADMIN
-app.use('/api/admin', adminRoutes);
-app.use('/api/admin/setup', adminSetupRoutes);
 app.use('/api/admin/import', adminImportRoutes);
+app.use('/api/admin/setup', adminSetupRoutes);
+app.use('/api/admin', adminRoutes);
 
 // INVITATIONS & ONBOARDING
 app.use('/api/invite', inviteRoutes);
