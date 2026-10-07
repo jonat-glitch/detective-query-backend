@@ -172,6 +172,27 @@ router.post('/setup', async (req, res) => {
       return res.status(400).json({ error: 'First name and last name are required.' });
     }
 
+    if (birthday) {
+      const birthDate = new Date(birthday);
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      if (isNaN(birthDate.getTime())) {
+        return res.status(400).json({ error: 'Please enter a valid birthday.' });
+      }
+      if (birthDate > today) {
+        return res.status(400).json({ error: 'Birthday cannot be in the future.' });
+      }
+      if (birthDate.getFullYear() < 1900) {
+        return res.status(400).json({ error: 'Please enter a valid birthday.' });
+      }
+      const age = today.getFullYear() - birthDate.getFullYear();
+      const m = today.getMonth() - birthDate.getMonth();
+      const calculatedAge = (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) ? age - 1 : age;
+      if (calculatedAge < 10) {
+        return res.status(400).json({ error: 'Student must be at least 10 years old.' });
+      }
+    }
+
     const fullName = [
       finalFirstName,
       finalMiddleName,

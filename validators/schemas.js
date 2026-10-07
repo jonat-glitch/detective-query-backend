@@ -39,7 +39,20 @@ const authSchemas = {
     extension_name: Joi.string().trim().allow('', null).optional(),
     gender: Joi.string().allow('', null).optional(),
     civil_status: Joi.string().allow('', null).optional(),
-    birthday: Joi.string().allow('', null).optional(),
+    birthday: Joi.string().allow('', null).optional().custom((value, helpers) => {
+      if (!value) return value;
+      const d = new Date(value);
+      if (isNaN(d.getTime())) return helpers.message('Invalid date format for birthday');
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      if (d > today) return helpers.message('Birthday cannot be in the future');
+      if (d.getFullYear() < 1900) return helpers.message('Please enter a valid birthday');
+      const age = today.getFullYear() - d.getFullYear();
+      const m = today.getMonth() - d.getMonth();
+      const exactAge = (m < 0 || (m === 0 && today.getDate() < d.getDate())) ? age - 1 : age;
+      if (exactAge < 10) return helpers.message('You must be at least 10 years old');
+      return value;
+    }),
     sex: Joi.string().allow('', null).optional(),
     email: Joi.string().email().required().messages({
       'string.email': 'A valid email is required',

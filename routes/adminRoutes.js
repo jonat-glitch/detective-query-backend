@@ -962,6 +962,15 @@ router.put("/users/:id/profile", async (req, res) => {
       return res.status(400).json({ error: "First name, last name, and email are required" });
     }
 
+    if (birthday) {
+      const birthDate = new Date(birthday);
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      if (isNaN(birthDate.getTime()) || birthDate > today || birthDate.getFullYear() < 1900) {
+        return res.status(400).json({ error: "Please enter a valid birthday (cannot be in the future)." });
+      }
+    }
+
     // Check email uniqueness
     const [existingEmail] = await systemDB.query(
       "SELECT user_id FROM users WHERE email = ? AND user_id != ?",
