@@ -119,19 +119,69 @@ router.get('/sections', async (req, res) => {
 // Body: { section_name }
 router.post('/sections', async (req, res) => {
   try {
-    const { section_name } = req.body;
+    const { section_name, auto_generate_code } = req.body;
     if (!section_name) {
       return res.status(400).json({ error: 'section_name is required' });
     }
-    const [result] = await systemDB.query(
-      'INSERT INTO sections (section_name, is_archived) VALUES (?, 0)',
-      [section_name.trim().toUpperCase()]
-    );
-    res.status(201).json({ message: 'Section created', section_id: result.insertId });
-  } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ error: 'Section already exists' });
+
+    // Support comma-separated multiple sections: e.g. "3A, 3B, 3C"
+    const names = String(section_name)
+      .split(',')
+      .map(s => s.trim().toUpperCase())
+      .filter(Boolean);
+
+    if (names.length === 0) {
+      return res.status(400).json({ error: 'At least one valid section name is required' });
     }
+
+    // Get active semester if auto_generate_code is true
+    let activeSem = null;
+    if (auto_generate_code) {
+      const [semRows] = await systemDB.query('SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1');
+      if (semRows.length > 0) activeSem = semRows[0].semester_id;
+    }
+
+    const created = [];
+    const skipped = [];
+
+    for (const name of names) {
+      const [existing] = await systemDB.query('SELECT section_id FROM sections WHERE section_name = ?', [name]);
+      if (existing.length > 0) {
+        skipped.push(name);
+        continue;
+      }
+
+      const [result] = await systemDB.query(
+        'INSERT INTO sections (section_name, is_archived) VALUES (?, 0)',
+        [name]
+      );
+      const newSecId = result.insertId;
+      created.push({ section_id: newSecId, section_name: name });
+
+      // If auto-generate code requested and active semester exists
+      if (auto_generate_code && activeSem) {
+        const uniqueCode = `${name.replace(/[^A-Z0-9]/g, '')}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        await systemDB.query(
+          `INSERT INTO class_codes (code, section_id, semester_id, is_active, is_archived)
+           VALUES (?, ?, ?, 1, 0)`,
+          [uniqueCode, newSecId, activeSem]
+        );
+      }
+    }
+
+    if (created.length === 0 && skipped.length > 0) {
+      return res.status(409).json({ error: `Section(s) already exist: ${skipped.join(', ')}` });
+    }
+
+    res.status(201).json({
+      message: created.length === 1 
+        ? `Section ${created[0].section_name} created${auto_generate_code ? ' (Class code auto-generated)' : ''}` 
+        : `${created.length} sections created successfully${auto_generate_code ? ' (Class codes auto-generated)' : ''}`,
+      created,
+      skipped,
+      section_id: created[0]?.section_id
+    });
+  } catch (err) {
     console.error('Create section error:', err);
     res.status(500).json({ error: 'Failed to create section' });
   }
@@ -597,9 +647,37 @@ router.get('/teacher-assignments', async (req, res) => {
 // Body: { teacher_id, section_id, course_id, year_level, semester_id, subject_name }
 router.post('/teacher-assignments', async (req, res) => {
   try {
-    const { teacher_id, section_id, course_id, year_level, semester_id, subject_name } = req.body;
-    if (!teacher_id || !section_id || !course_id || !year_level || !semester_id || !subject_name) {
-      return res.status(400).json({ error: 'All fields are required' });
+    let { teacher_id, section_id, course_id, year_level, semester_id, subject_name } = req.body;
+    if (!teacher_id || !section_id || !subject_name) {
+      return res.status(400).json({ error: 'Teacher, section, and subject name are required' });
+    }
+
+    // Auto-resolve semester_id if not provided
+    if (!semester_id) {
+      const [activeSemRows] = await systemDB.query('SELECT semester_id FROM semesters WHERE is_active = 1 LIMIT 1');
+      if (activeSemRows.length > 0) {
+        semester_id = activeSemRows[0].semester_id;
+      } else {
+        const [anySemRows] = await systemDB.query('SELECT semester_id FROM semesters ORDER BY semester_id DESC LIMIT 1');
+        semester_id = anySemRows[0]?.semester_id;
+      }
+    }
+
+    // Auto-resolve course_id if not provided
+    if (!course_id) {
+      const [firstCourse] = await systemDB.query('SELECT course_id FROM courses WHERE is_archived = 0 ORDER BY course_id ASC LIMIT 1');
+      course_id = firstCourse[0]?.course_id || 1;
+    }
+
+    // Auto-resolve year_level from section name if not provided (e.g. "3J" -> 3)
+    if (!year_level) {
+      const [[secRow]] = await systemDB.query('SELECT section_name FROM sections WHERE section_id = ?', [section_id]);
+      if (secRow) {
+        const match = secRow.section_name.match(/^[A-Za-z]*([1-4])/);
+        year_level = match ? Number(match[1]) : 1;
+      } else {
+        year_level = 1;
+      }
     }
 
     const [[teacher]] = await systemDB.query(
