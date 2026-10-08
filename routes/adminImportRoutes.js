@@ -28,55 +28,86 @@ const router = express.Router();
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/template', async (req, res) => {
   try {
+    const type = (req.query.type || 'all').toLowerCase();
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'Detective Query';
     workbook.created = new Date();
 
-    // Sheet 1: Students (with real-world sample rows)
-    const wsStudents = workbook.addWorksheet('Students');
-    wsStudents.columns = [
-      { header: 'email', key: 'email', width: 28 },
-      { header: 'first_name', key: 'first_name', width: 16 },
-      { header: 'middle_name', key: 'middle_name', width: 16 },
-      { header: 'last_name', key: 'last_name', width: 16 },
-      { header: 'extension_name', key: 'extension_name', width: 16 },
-      { header: 'student_number', key: 'student_number', width: 18 },
-      { header: 'section', key: 'section', width: 12 },
-      { header: 'course_code', key: 'course_code', width: 14 },
-      { header: 'year_level', key: 'year_level', width: 12 },
-      { header: 'role', key: 'role', width: 12 },
-    ];
+    const isStudentOnly = type === 'student';
+    const isTeacherOnly = type === 'teacher';
 
-    wsStudents.addRows([
-      ['juan.delacruz@example.com', 'Juan', 'Santos', 'Dela Cruz', 'Jr.', '21-00123', '3J', 'BSIT', 3, 'student'],
-      ['maria.santos@example.com', 'Maria Clara', 'Reyes', 'Santos', '', '21-00456', '2E', 'BSIT', 2, 'student'],
-      ['pedro.penduko@example.com', 'Pedro', 'Cruz', 'Penduko', '', '21-00789', '3J', 'BSIT', 3, 'student']
-    ]);
+    // 1. Students Sheet (if not teacher-only)
+    if (!isTeacherOnly) {
+      const wsStudents = workbook.addWorksheet('Students');
+      wsStudents.columns = [
+        { header: 'email', key: 'email', width: 28 },
+        { header: 'first_name', key: 'first_name', width: 16 },
+        { header: 'middle_name', key: 'middle_name', width: 16 },
+        { header: 'last_name', key: 'last_name', width: 16 },
+        { header: 'extension_name', key: 'extension_name', width: 16 },
+        { header: 'student_number', key: 'student_number', width: 18 },
+        { header: 'section', key: 'section', width: 12 },
+        { header: 'course_code', key: 'course_code', width: 14 },
+        { header: 'year_level', key: 'year_level', width: 12 },
+        { header: 'role', key: 'role', width: 12 },
+      ];
+      wsStudents.addRows([
+        ['juan.delacruz@example.com', 'Juan', 'Santos', 'Dela Cruz', 'Jr.', '21-00123', '3J', 'BSIT', 3, 'student'],
+        ['maria.santos@example.com', 'Maria Clara', 'Reyes', 'Santos', '', '21-00456', '2E', 'BSIT', 2, 'student'],
+        ['pedro.penduko@example.com', 'Pedro', 'Cruz', 'Penduko', '', '21-00789', '3J', 'BSIT', 3, 'student']
+      ]);
+    }
 
-    // Sheet 2: Column Instructions & Reference
+    // 2. Teachers Sheet (if not student-only)
+    if (!isStudentOnly) {
+      const wsTeachers = workbook.addWorksheet('Teachers');
+      wsTeachers.columns = [
+        { header: 'email', key: 'email', width: 28 },
+        { header: 'first_name', key: 'first_name', width: 16 },
+        { header: 'middle_name', key: 'middle_name', width: 16 },
+        { header: 'last_name', key: 'last_name', width: 16 },
+        { header: 'extension_name', key: 'extension_name', width: 16 },
+        { header: 'teacher_id', key: 'teacher_id', width: 18 },
+        { header: 'role', key: 'role', width: 12 },
+      ];
+      wsTeachers.addRows([
+        ['prof.reyes@neust.edu.ph', 'Ricardo', 'Dalisay', 'Reyes', '', 'EMP-2021-0042', 'teacher'],
+        ['engr.santos@neust.edu.ph', 'Angelica', 'Luna', 'Santos', '', 'EMP-2022-0089', 'teacher']
+      ]);
+    }
+
+    // 3. Column Guide Sheet
     const wsGuide = workbook.addWorksheet('Column Guide');
     wsGuide.columns = [
       { header: 'COLUMN NAME', key: 'col', width: 18 },
+      { header: 'APPLIES TO', key: 'target', width: 14 },
       { header: 'REQUIRED?', key: 'req', width: 12 },
       { header: 'DESCRIPTION', key: 'desc', width: 60 },
       { header: 'EXAMPLE VALUE', key: 'example', width: 30 }
     ];
 
     wsGuide.addRows([
-      ['email', 'YES', 'Active Gmail or university email. Private setup link is sent here.', 'juan.delacruz@gmail.com'],
-      ['first_name', 'YES', 'Student given name.', 'Juan'],
-      ['middle_name', 'NO', 'Middle name or middle initial. Leave blank if none.', 'Santos'],
-      ['last_name', 'YES', 'Family name / Surname.', 'Dela Cruz'],
-      ['extension_name', 'NO', 'Name suffix (Jr., Sr., III). Leave blank if none.', 'Jr.'],
-      ['student_number', 'YES', 'Official School ID Number from registrar.', '21-00123'],
-      ['section', 'YES', 'Section name matching Academic Setup (case-insensitive).', '3J'],
-      ['course_code', 'YES', 'Course/Program code matching Academic Setup.', 'BSIT'],
-      ['year_level', 'YES', 'Year level number (1, 2, 3, or 4).', '3'],
-      ['role', 'NO', 'Leave as "student" (default) or "teacher".', 'student']
+      ['email', 'All', 'YES', 'Active Gmail or university email. Activation link is sent here.', 'user@example.com'],
+      ['first_name', 'All', 'YES', 'Given name.', 'Juan'],
+      ['middle_name', 'All', 'NO', 'Middle name or middle initial. Leave blank if none.', 'Santos'],
+      ['last_name', 'All', 'YES', 'Family name / Surname.', 'Dela Cruz'],
+      ['extension_name', 'All', 'NO', 'Name suffix (Jr., Sr., III). Leave blank if none.', 'Jr.'],
+      ['student_number', 'Students', 'YES', 'Official School ID Number from registrar.', '21-00123'],
+      ['section', 'Students', 'YES', 'Section name matching Academic Setup (e.g. 3J, 2E).', '3J'],
+      ['course_code', 'Students', 'YES', 'Course/Program code matching Academic Setup (e.g. BSIT).', 'BSIT'],
+      ['year_level', 'Students', 'YES', 'Year level number (1, 2, 3, or 4).', '3'],
+      ['teacher_id', 'Teachers', 'YES', 'Official Faculty / Employee ID number.', 'EMP-2021-0042'],
+      ['role', 'All', 'NO', 'Set to "student" or "teacher". Defaults to student if blank.', 'teacher']
     ]);
 
+    const filename = isTeacherOnly
+      ? 'detective_query_teacher_template.xlsx'
+      : isStudentOnly
+      ? 'detective_query_student_template.xlsx'
+      : 'detective_query_import_template.xlsx';
+
     const buf = await workbook.xlsx.writeBuffer();
-    res.setHeader('Content-Disposition', 'attachment; filename="detective_query_import_template.xlsx"');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(buf);
   } catch (err) {
@@ -145,38 +176,45 @@ async function parseFile(buffer, originalname) {
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
-  const worksheet = workbook.worksheets[0];
-  if (!worksheet) return [];
+  
+  const allRows = [];
+  for (const worksheet of workbook.worksheets) {
+    const wsName = worksheet.name ? worksheet.name.toLowerCase() : '';
+    if (wsName.includes('guide') || wsName.includes('instruction')) continue;
 
-  const headers = [];
-  const headerRow = worksheet.getRow(1);
-  headerRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-    headers[colNumber] = (cell.text || cell.value || '').toString().trim();
-  });
+    const headers = [];
+    const headerRow = worksheet.getRow(1);
+    headerRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      headers[colNumber] = (cell.text || cell.value || '').toString().trim();
+    });
 
-  const rows = [];
-  worksheet.eachRow((row, rowNumber) => {
-    if (rowNumber === 1) return;
-    const rowData = {};
-    let hasAnyVal = false;
-    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-      const colName = headers[colNumber];
-      if (colName) {
-        let val = cell.value;
-        if (val !== null && typeof val === 'object') {
-          val = val.text || val.result || '';
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      const rowData = {};
+      let hasAnyVal = false;
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        const colName = headers[colNumber];
+        if (colName) {
+          let val = cell.value;
+          if (val !== null && typeof val === 'object') {
+            val = val.text || val.result || '';
+          }
+          val = val !== undefined && val !== null ? String(val).trim() : '';
+          if (val) hasAnyVal = true;
+          rowData[colName] = val;
         }
-        val = val !== undefined && val !== null ? String(val).trim() : '';
-        if (val) hasAnyVal = true;
-        rowData[colName] = val;
+      });
+      if (hasAnyVal) {
+        // Auto-tag teacher if in a sheet named "Teachers" or "Faculty" and role wasn't explicitly typed
+        if ((wsName.includes('teacher') || wsName.includes('faculty')) && !rowData.role) {
+          rowData.role = 'teacher';
+        }
+        allRows.push(rowData);
       }
     });
-    if (hasAnyVal) {
-      rows.push(rowData);
-    }
-  });
+  }
 
-  return rows;
+  return allRows;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
