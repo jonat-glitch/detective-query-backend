@@ -287,10 +287,10 @@ router.post('/csv', upload.single('file'), async (req, res) => {
       await systemDB.query(
         `INSERT INTO student_invitations
          (email, first_name, middle_name, last_name, extension_name, student_number,
-          section_id, course_id, year_level, semester_id,
+          section_id, course_id, year_level, semester_id, role_id,
           invite_token, token_expires_at, status,
           import_batch_id, imported_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
         [
           email,
           row.first_name || null,
@@ -298,7 +298,7 @@ router.post('/csv', upload.single('file'), async (req, res) => {
           row.last_name   || null,
           row.extension_name || null,
           row.student_number || row.teacher_id || null,
-          section_id, course_id, year_level, semester_id,
+          section_id, course_id, year_level, semester_id, role_id,
           invite_token, tokenExpiry,
           batchId, importedBy,
         ]
@@ -426,6 +426,7 @@ router.post('/resend/:invitationId', async (req, res) => {
       to:          inv.email,
       fullName:    displayName,
       token:       newToken,
+      role_id:     inv.role_id || 1,
     });
 
     res.json({ message: `Invite resent to ${inv.email}` });
@@ -464,6 +465,7 @@ router.post('/resend-batch/:batchId', async (req, res) => {
           to:          inv.email,
           fullName:    displayName,
           token:       newToken,
+          role_id:     inv.role_id || 1,
         });
         sent++;
       } catch {

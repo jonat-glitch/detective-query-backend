@@ -90,8 +90,8 @@ router.get(['/verify/:token', '/verify'], async (req, res) => {
       semester_id: inv.semester_id,
       school_year: inv.school_year || '',
       term: inv.term || '',
-      // Default to student (1) if not specified
-      role_id: 1
+      // Dynamic role: 1 for student, 2 for teacher
+      role_id: inv.role_id || 1
     });
 
   } catch (err) {
@@ -202,15 +202,16 @@ router.post('/setup', async (req, res) => {
 
     // 4. Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    const roleId = 1; // student (or could infer if teacher role was saved)
+    const roleId = inv.role_id || 1;
+    const isTeacher = roleId === 2;
 
     // 5. Insert into users
     const [insertResult] = await systemDB.query(
       `INSERT INTO users
         (first_name, middle_name, last_name, extension_name, full_name,
          sex, gender, civil_status, birthday,
-         email, password, role_id, student_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         email, password, role_id, student_id, teacher_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         finalFirstName,
         finalMiddleName,
@@ -224,7 +225,8 @@ router.post('/setup', async (req, res) => {
         email,
         hashedPassword,
         roleId,
-        finalStudentNumber
+        isTeacher ? null : finalStudentNumber,
+        isTeacher ? (finalStudentNumber || null) : null
       ]
     );
 
