@@ -68,6 +68,7 @@ router.get("/users", async (req, res) => {
         u.full_name, 
         u.email, 
         u.role_id, 
+        u.avatar,
         u.sex,
         u.gender,
         u.civil_status,
@@ -451,7 +452,7 @@ router.get("/rooms/:room_id/students", async (req, res) => {
   try {
     const { room_id } = req.params;
     const [students] = await systemDB.query(
-      `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id, rs.status
+      `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id, u.avatar, rs.status
        FROM room_students rs
        JOIN users u ON rs.student_id = u.user_id
        WHERE rs.room_id = ?
@@ -474,7 +475,7 @@ router.get("/rooms/:room_id/leaderboard", async (req, res) => {
     const { room_id } = req.params;
     const [rows] = await systemDB.query(
       `SELECT
-         u.user_id, u.full_name, u.student_id,
+         u.user_id, u.full_name, u.student_id, u.avatar,
          COALESCE(SUM(a.score_awarded), 0)            AS total_score,
          COUNT(CASE WHEN a.is_correct = 1 THEN 1 END) AS correct_answers,
          COUNT(a.attempt_id)                          AS total_attempts,
@@ -1084,6 +1085,7 @@ router.get("/change-requests", async (req, res) => {
         u.role_id,
         u.student_id,
         u.teacher_id,
+        u.avatar,
         u.section AS current_user_section
       FROM account_change_requests acr
       JOIN users u ON acr.user_id = u.user_id

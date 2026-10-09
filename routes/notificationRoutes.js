@@ -12,7 +12,7 @@ systemDB.query(`ALTER TABLE notifications ADD COLUMN notification_type VARCHAR(5
 router.get("/students/all", authenticateToken, async (req, res) => {
   try {
     const [rows] = await systemDB.query(
-      `SELECT user_id, student_id,
+      `SELECT user_id, student_id, avatar,
               COALESCE(NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), full_name, email) AS full_name,
               email,
               section,
@@ -31,7 +31,7 @@ router.get("/students/section/:section", authenticateToken, async (req, res) => 
   try {
     const { section } = req.params;
     const [rows] = await systemDB.query(
-      `SELECT user_id, student_id,
+      `SELECT user_id, student_id, avatar,
               COALESCE(NULLIF(TRIM(CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,''))), ''), full_name, email) AS full_name,
               email,
               section,

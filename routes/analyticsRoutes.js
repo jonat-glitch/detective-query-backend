@@ -116,7 +116,7 @@ router.get('/students/:room_id', async (req, res) => {
 
         // All students enrolled in the room
         const [students] = await systemDB.query(`
-            SELECT u.user_id, u.full_name, u.total_points, u.current_level,
+            SELECT u.user_id, u.full_name, u.avatar, u.total_points, u.current_level,
                    rs.requested_at AS joined_at
             FROM room_students rs
             JOIN users u ON u.user_id = rs.student_id
@@ -447,7 +447,7 @@ router.get('/all-students', async (req, res) => {
                 if (own.length === 0) return res.status(403).json({ error: 'Not your room' });
             }
             studentQuery  = `
-                SELECT u.user_id, u.student_id, u.full_name, u.total_points, u.current_level
+                SELECT u.user_id, u.student_id, u.full_name, u.avatar, u.total_points, u.current_level
                 FROM room_students rs
                 JOIN users u ON u.user_id = rs.student_id
                 WHERE rs.room_id = ? AND rs.status = 'Approved'
@@ -456,7 +456,7 @@ router.get('/all-students', async (req, res) => {
             studentParams = [room_id];
         } else {
             studentQuery  = `
-                SELECT user_id, student_id, full_name, total_points, current_level
+                SELECT user_id, student_id, full_name, avatar, total_points, current_level
                 FROM users
                 WHERE role_id = 1
                 ORDER BY full_name ASC
