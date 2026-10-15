@@ -1063,7 +1063,8 @@ router.get('/active/:room_id',
                     c.title,
                     c.description,
                     c.objectives AS case_objectives_text,
-                    c.mode
+                    c.mode,
+                    c.sql_type
                  FROM game_sessions gs
                  JOIN cases c ON gs.case_id = c.case_id
                  WHERE gs.room_id = ?
@@ -1143,6 +1144,7 @@ router.get('/active/:room_id',
                 is_paused: session.is_paused === 1,
                 paused_at: session.paused_at,
                 mode: session.mode,
+                sql_type: session.sql_type || 'DQL',
                 objectives,
                 study_material_url
             });

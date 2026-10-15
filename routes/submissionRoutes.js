@@ -1383,7 +1383,7 @@ router.get('/rank/schema/:room_id', authenticateToken, async (req, res) => {
 
         // 1️⃣ Get active session
         const [sessions] = await systemDB.query(
-            `SELECT gs.*, c.dataset_id, c.sql_type
+            `SELECT gs.*, c.dataset_id, c.sql_type, c.setup_sql
              FROM game_sessions gs
              JOIN cases c ON gs.case_id = c.case_id
              WHERE gs.room_id = ?
@@ -1407,7 +1407,31 @@ router.get('/rank/schema/:room_id', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: "Dataset not configured" });
         }
 
-        const dbName = session.sql_type === 'DQL' ? 'detective_query_playground' : `playground_user_${userId}`;
+        let dbName = 'detective_query_playground';
+        if (session.sql_type !== 'DQL') {
+            dbName = `playground_user_${userId}`;
+            // If student has not yet run any query in this session, initialize sandbox with case's setup_sql
+            const [existingAttempts] = await systemDB.query(
+                `SELECT 1 FROM attempts 
+                 WHERE user_id = ? AND session_id = ? AND sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') 
+                 LIMIT 1`,
+                [userId, session.session_id]
+            );
+            if (existingAttempts.length === 0) {
+                await recreateStudentDatabase(userId);
+                if (session.setup_sql && session.setup_sql.trim()) {
+                    const setupConn = await playgroundDB.getConnection();
+                    try {
+                        await setupConn.query(`USE \`${dbName}\``);
+                        await runSetup(setupConn, session.setup_sql);
+                    } catch (e) {
+                        console.error("Schema setup error:", e.message);
+                    } finally {
+                        setupConn.release();
+                    }
+                }
+            }
+        }
 
         // 3️⃣ Fetch schema from information_schema
         const [columns] = await playgroundDB.query(
