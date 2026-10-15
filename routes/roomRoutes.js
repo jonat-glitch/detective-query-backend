@@ -7,15 +7,35 @@ const path = require('path');
 const fs = require('fs');
 
 // ── Idempotent migration: ensure pause & archive columns exist ────────────────
+async function addColumnIfNotExists(table, column, definition) {
+  try {
+    const [cols] = await systemDB.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [table, column]
+    );
+    if (cols.length === 0) {
+      await systemDB.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    }
+  } catch (err) {
+    console.warn(`Migration notice (${table}.${column}):`, err.message);
+  }
+}
+
 (async () => {
   try {
-    await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS is_paused TINYINT(1) NOT NULL DEFAULT 0`);
-    await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS paused_at DATETIME NULL`);
-    await systemDB.query(`ALTER TABLE game_sessions ADD COLUMN IF NOT EXISTS paused_seconds INT NOT NULL DEFAULT 0`);
-    await systemDB.query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS is_archived TINYINT(1) NOT NULL DEFAULT 0`);
-    await systemDB.query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS archived_at DATETIME NULL`);
+    await addColumnIfNotExists('game_sessions', 'is_paused', 'TINYINT(1) NOT NULL DEFAULT 0');
+    await addColumnIfNotExists('game_sessions', 'paused_at', 'DATETIME NULL');
+    await addColumnIfNotExists('game_sessions', 'paused_seconds', 'INT NOT NULL DEFAULT 0');
+    await addColumnIfNotExists('rooms', 'is_archived', 'TINYINT(1) NOT NULL DEFAULT 0');
+    await addColumnIfNotExists('rooms', 'archived_at', 'DATETIME NULL');
+    await addColumnIfNotExists('rooms', 'sql_type', "ENUM('DDL','DML','DQL') NOT NULL DEFAULT 'DQL'");
+    await addColumnIfNotExists('cases', 'module_order', 'TINYINT NOT NULL DEFAULT 3');
+
+    // Back-fill existing cases based on sql_type
+    await systemDB.query(`UPDATE cases SET module_order = 1 WHERE sql_type = 'DDL' AND (module_order IS NULL OR module_order = 3)`);
+    await systemDB.query(`UPDATE cases SET module_order = 2 WHERE sql_type = 'DML' AND (module_order IS NULL OR module_order = 3)`);
   } catch (e) {
-    // Columns may already exist on some DB flavours — safe to ignore
+    console.warn('Initial room migration note:', e.message);
   }
 })();
 
@@ -25,7 +45,13 @@ router.post('/create-room',
     async (req, res) => {
         try {
             const teacherId = req.user.user_id;
-            let { room_name, room_code, section_id, semester_id, course_id, year_level } = req.body;
+            let { room_name, room_code, section_id, semester_id, course_id, year_level, sql_type } = req.body;
+            // Validate sql_type
+            const validTypes = ['DDL', 'DML', 'DQL'];
+            if (!sql_type || !validTypes.includes(sql_type.toUpperCase())) {
+                sql_type = 'DQL'; // default for backward compatibility
+            }
+            sql_type = sql_type.toUpperCase();
 
             if (!room_name || !room_name.trim()) {
                 return res.status(400).json({ error: "Room name is required" });
@@ -61,9 +87,9 @@ router.post('/create-room',
             }
 
             const [result] = await systemDB.query(
-                `INSERT INTO rooms (teacher_id, room_name, room_code, is_archived, section_id, semester_id, course_id, year_level)
-                 VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
-                [teacherId, room_name, room_code, section_id || null, semester_id || null, course_id || null, year_level || null]
+                `INSERT INTO rooms (teacher_id, room_name, room_code, is_archived, section_id, semester_id, course_id, year_level, sql_type)
+                 VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+                [teacherId, room_name, room_code, section_id || null, semester_id || null, course_id || null, year_level || null, sql_type]
             );
 
             const newRoomId = result.insertId;
@@ -459,6 +485,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
           SELECT
             r.room_id,
             r.room_name,
+            r.sql_type,
             u.full_name AS teacher_name,
 
             CASE
@@ -504,7 +531,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
 
         WHERE (r.is_archived = 0 OR r.is_archived IS NULL)
 
-        GROUP BY r.room_id, r.room_name, u.full_name;
+        GROUP BY r.room_id, r.room_name, r.sql_type, u.full_name;
         `, [studentId]);
 
         res.json({ rooms });
@@ -729,7 +756,6 @@ router.post('/activate',
             );
 
             if (caseData.length > 0 && caseData[0].dataset_id) {
-                const submissionService = require('../services/submissionService');
                 await submissionService.resetPlayground(caseData[0].dataset_id);
             }
 
@@ -1268,18 +1294,25 @@ router.get('/cases',
     authorizeRole([2]),
     async (req, res) => {
         try {
-            const { type } = req.query;
+            const { type, mode } = req.query;
             const params = [];
+            // Rooms run Rank games; default to 'Rank' mode cases unless 'all' is requested
             let where = 'WHERE is_active = 1';
+            const targetMode = mode || 'Rank';
+            if (targetMode !== 'all') {
+                where += ' AND mode = ?';
+                params.push(targetMode);
+            }
             if (type && ['DQL','DML','DDL'].includes(type)) {
                 where += ' AND sql_type = ?';
                 params.push(type);
             }
             const [cases] = await systemDB.query(
-                `SELECT case_id, title, description, difficulty_id, sql_type, setup_sql, expected_result_sql, dataset_id
+                `SELECT case_id, title, description, difficulty_id, sql_type, module_order, mode,
+                        setup_sql, expected_result_sql, dataset_id
                  FROM cases
                  ${where}
-                 ORDER BY sql_type, difficulty_id, case_id`,
+                 ORDER BY module_order, difficulty_id, case_id`,
                 params
             );
             res.json(cases);
@@ -1301,12 +1334,13 @@ router.get('/practice-cases',
                 return res.status(400).json({ error: 'type must be DQL, DML, or DDL' });
             }
             const [cases] = await systemDB.query(
-                `SELECT c.case_id, c.title, c.description, c.objectives, c.base_points, c.difficulty_id, c.sql_type,
+                `SELECT c.case_id, c.title, c.description, c.objectives, c.base_points,
+                        c.difficulty_id, c.sql_type, c.module_order,
                         d.difficulty_name
                  FROM cases c
                  JOIN difficulty d ON c.difficulty_id = d.difficulty_id
-                 WHERE c.is_active = 1 AND c.sql_type = ?
-                 ORDER BY d.difficulty_id, c.case_id`,
+                 WHERE c.is_active = 1 AND c.mode = 'Practice' AND c.sql_type = ?
+                 ORDER BY c.module_order, d.difficulty_id, c.case_id`,
                 [type]
             );
             res.json(cases);
@@ -1323,17 +1357,25 @@ router.post('/create-case',
     authorizeRole([2]),
     async (req, res) => {
         try {
-            const { title, description, difficulty_id, sql_type, setup_sql, expected_result_sql, dataset_id, correct_query, correct_suspect_id } = req.body;
+            const { title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
+                    dataset_id, correct_query, correct_suspect_id, module_order } = req.body;
             if (!title || !description || !difficulty_id || !sql_type) {
                 return res.status(400).json({ error: 'title, description, difficulty_id, sql_type are required' });
             }
             if (!['DQL','DML','DDL'].includes(sql_type)) {
                 return res.status(400).json({ error: 'sql_type must be DQL, DML, or DDL' });
             }
+            // Auto-derive module_order if not provided
+            const moduleOrderMap = { DDL: 1, DML: 2, DQL: 3 };
+            const resolvedModuleOrder = (module_order && Number.isInteger(Number(module_order)))
+                ? Number(module_order)
+                : (moduleOrderMap[sql_type] || 3);
             const [result] = await systemDB.query(
-                `INSERT INTO cases (title, description, difficulty_id, sql_type, setup_sql, expected_result_sql, dataset_id, correct_query, correct_suspect_id, is_active)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-                [title, description, difficulty_id, sql_type, setup_sql || null, expected_result_sql || null, dataset_id || 1, correct_query || null, correct_suspect_id || null]
+                `INSERT INTO cases (title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
+                                    dataset_id, correct_query, correct_suspect_id, module_order, is_active)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+                [title, description, difficulty_id, sql_type, setup_sql || null, expected_result_sql || null,
+                 dataset_id || 1, correct_query || null, correct_suspect_id || null, resolvedModuleOrder]
             );
             res.json({ message: 'Case created', case_id: result.insertId });
         } catch (error) {
@@ -1350,7 +1392,8 @@ router.put('/cases/:case_id',
     async (req, res) => {
         try {
             const { case_id } = req.params;
-            const { title, description, difficulty_id, sql_type, setup_sql, expected_result_sql, dataset_id, correct_query, correct_suspect_id, is_active } = req.body;
+            const { title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
+                    dataset_id, correct_query, correct_suspect_id, is_active, module_order } = req.body;
             await systemDB.query(
                 `UPDATE cases
                  SET title = COALESCE(?, title),
@@ -1362,9 +1405,14 @@ router.put('/cases/:case_id',
                      dataset_id = COALESCE(?, dataset_id),
                      correct_query = COALESCE(?, correct_query),
                      correct_suspect_id = ?,
+                     module_order = COALESCE(?, module_order),
                      is_active = COALESCE(?, is_active)
                  WHERE case_id = ?`,
-                [title, description, difficulty_id, sql_type, setup_sql, expected_result_sql, dataset_id, correct_query, correct_suspect_id !== undefined ? correct_suspect_id : null, is_active, case_id]
+                [title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
+                 dataset_id, correct_query,
+                 correct_suspect_id !== undefined ? correct_suspect_id : null,
+                 module_order !== undefined ? Number(module_order) : null,
+                 is_active, case_id]
             );
             res.json({ message: 'Case updated' });
         } catch (error) {
@@ -1721,4 +1769,332 @@ router.get('/session-logs/:room_id',
     }
 );
 
-module.exports = router;
+// ── GET Completed Cases in Room (for Teacher & Room Progress) ────────────────
+router.get('/completed-cases/:room_id',
+    authenticateToken,
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const userId = req.user.user_id;
+            const roleId = req.user.role_id;
+
+            // Verify teacher owns the room OR student is an approved member
+            if (roleId === 2) {
+                const [room] = await systemDB.query(
+                    `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                    [room_id, userId]
+                );
+                if (room.length === 0) {
+                    return res.status(403).json({ error: "Access denied: Not your room" });
+                }
+            } else if (roleId === 1) {
+                const [member] = await systemDB.query(
+                    `SELECT 1 FROM room_students WHERE room_id = ? AND student_id = ? AND status = 'Approved'`,
+                    [room_id, userId]
+                );
+                if (member.length === 0) {
+                    return res.status(403).json({ error: "Access denied: Not a room member" });
+                }
+            }
+
+            // Fetch distinct cases that have been run and ended in this room
+            const [rows] = await systemDB.query(
+                `SELECT 
+                    gs.case_id,
+                    c.title,
+                    c.sql_type,
+                    c.difficulty_id,
+                    MAX(gs.end_time) AS completed_at,
+                    COUNT(DISTINCT gs.session_id) AS session_count
+                 FROM game_sessions gs
+                 JOIN cases c ON gs.case_id = c.case_id
+                 WHERE gs.room_id = ?
+                   AND LOWER(gs.status) = 'ended'
+                 GROUP BY gs.case_id, c.title, c.sql_type, c.difficulty_id
+                 ORDER BY completed_at ASC`,
+                [room_id]
+            );
+
+            // Compute category breakdown
+            const summary = {
+                DDL: rows.filter(r => (r.sql_type || '').toUpperCase() === 'DDL').length,
+                DML: rows.filter(r => (r.sql_type || '').toUpperCase() === 'DML').length,
+                DQL: rows.filter(r => (r.sql_type || '').toUpperCase() === 'DQL').length,
+                total: rows.length,
+            };
+
+            res.json({
+                completedCases: rows,
+                completedCaseIds: rows.map(r => r.case_id),
+                summary
+            });
+        } catch (error) {
+            console.error("GET COMPLETED CASES ERROR:", error);
+            res.status(500).json({ error: "Failed to fetch completed cases" });
+        }
+    }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RANKED DML ENDPOINTS — POST /rooms/:room_id/rank-run-dml
+//                         POST /rooms/:room_id/rank-submit-dml
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper: validate DML query
+function validateDmlQuery(query) {
+    const trimmed = query.trim();
+    if (!/^\s*(insert|update|delete)\s/i.test(trimmed))
+        return 'Only INSERT, UPDATE, or DELETE statements are allowed for DML.';
+    const forbidden = [/\bdrop\b/i, /\balter\b/i, /\btruncate\b/i, /\bcreate\b/i, /--/, /\/\*/, /#/];
+    for (const p of forbidden) if (p.test(trimmed)) return 'Forbidden SQL operation for DML.';
+    return null;
+}
+
+// Helper: validate DDL query
+function validateDdlQuery(query) {
+    const trimmed = query.trim();
+    if (!/^\s*(create|alter|drop)\s/i.test(trimmed))
+        return 'Only CREATE, ALTER, or DROP statements are allowed for DDL.';
+    const forbidden = [/\binsert\b/i, /\bupdate\b/i, /\bdelete\b/i, /\btruncate\b/i, /--/, /\/\*/, /#/];
+    for (const p of forbidden) if (p.test(trimmed)) return 'Forbidden SQL operation for DDL.';
+    return null;
+}
+
+// Helper: get or create a student's ranked sandbox DB for a room
+async function getRankedSandboxConnection(userId, roomId) {
+    const dbName = `ranked_sandbox_${userId}_room_${roomId}`;
+    try {
+        await systemDB.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
+    } catch (e) { /* may already exist */ }
+    const conn = await playgroundDB.getConnection();
+    await conn.query(`USE \`${dbName}\``);
+    return { conn, dbName };
+}
+
+// POST /rooms/:room_id/rank-run-dml — Preview DML (dry-run in sandbox)
+router.post('/:room_id/rank-run-dml', authenticateToken, authorizeRole([1]), async (req, res) => {
+    const { room_id } = req.params;
+    const { sql } = req.body;
+    const userId = req.user.user_id;
+
+    const validationError = validateDmlQuery(sql);
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    let conn;
+    try {
+        // Verify student is in this room
+        const [membership] = await systemDB.query(
+            `SELECT 1 FROM room_students WHERE room_id = ? AND student_id = ? AND status = 'Approved'`,
+            [room_id, userId]
+        );
+        if (!membership.length) return res.status(403).json({ error: 'Not enrolled in this room.' });
+
+        // Get the room's setup SQL from its active session case
+        const [sessionRows] = await systemDB.query(`
+            SELECT c.setup_sql FROM game_sessions gs
+            JOIN cases c ON c.case_id = gs.case_id
+            WHERE gs.room_id = ? AND gs.status = 'Active'
+            LIMIT 1
+        `, [room_id]);
+
+        const { conn: sandboxConn, dbName } = await getRankedSandboxConnection(userId, room_id);
+        conn = sandboxConn;
+
+        // Setup tables if needed
+        if (sessionRows[0]?.setup_sql) {
+            const stmts = sessionRows[0].setup_sql.split(';').map(s => s.trim()).filter(Boolean);
+            for (const stmt of stmts) {
+                try { await conn.query(stmt); } catch {}
+            }
+        }
+
+        await conn.beginTransaction();
+        let rows = [];
+        try {
+            const [result] = await conn.query(sql);
+            rows = Array.isArray(result) ? result : [{ affected_rows: result.affectedRows || 0 }];
+            await conn.rollback(); // preview only — do not commit
+        } catch (e) {
+            await conn.rollback();
+            return res.status(400).json({ error: e.message });
+        }
+
+        res.json({ rows, message: 'Preview only — no changes committed.' });
+    } catch (e) {
+        console.error('rank-run-dml error:', e);
+        res.status(500).json({ error: 'Server error' });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+// POST /rooms/:room_id/rank-submit-dml — Submit DML answer
+router.post('/:room_id/rank-submit-dml', authenticateToken, authorizeRole([1]), async (req, res) => {
+    const { room_id } = req.params;
+    const { sql } = req.body;
+    const userId = req.user.user_id;
+
+    const validationError = validateDmlQuery(sql);
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    try {
+        // Get active session + case details
+        const [sessionRows] = await systemDB.query(`
+            SELECT gs.session_id, gs.case_id, c.expected_output, c.setup_sql, c.base_points
+            FROM game_sessions gs
+            JOIN cases c ON c.case_id = gs.case_id
+            WHERE gs.room_id = ? AND gs.status = 'Active'
+            LIMIT 1
+        `, [room_id]);
+
+        if (!sessionRows.length) return res.status(404).json({ error: 'No active session found.' });
+
+        const { session_id, case_id, expected_output, setup_sql, base_points } = sessionRows[0];
+
+        // Use submissionService if DML evaluation exists, else do basic comparison
+        let is_correct = false;
+        let feedback = 'Incorrect. Check your query and try again.';
+        let score_awarded = 0;
+
+        try {
+            const result = await submissionService.evaluateSubmission({
+                userId, caseId: case_id, sessionId: session_id,
+                query: sql, sqlType: 'DML'
+            });
+            is_correct = result.is_correct;
+            feedback = result.feedback;
+            score_awarded = result.score_awarded || 0;
+        } catch {
+            // Fallback: record attempt with 0 score
+            feedback = 'Submission recorded. Evaluation pending.';
+        }
+
+        if (is_correct) {
+            await systemDB.query(`
+                INSERT INTO student_sessions (student_id, session_id, score, submitted_at, is_correct)
+                VALUES (?, ?, ?, NOW(), 1)
+                ON DUPLICATE KEY UPDATE score = VALUES(score), submitted_at = NOW(), is_correct = 1
+            `, [userId, session_id, score_awarded]);
+
+            if (score_awarded > 0) {
+                await submissionService.updateUserProgress(
+                    systemDB,
+                    userId,
+                    case_id,
+                    score_awarded,
+                    true
+                );
+            }
+        }
+
+        res.json({ is_correct, feedback, score_awarded });
+    } catch (e) {
+        console.error('rank-submit-dml error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RANKED DDL ENDPOINTS — POST /rooms/:room_id/rank-run-ddl
+//                         POST /rooms/:room_id/rank-submit-ddl
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// POST /rooms/:room_id/rank-run-ddl — Preview DDL (dry-run in sandbox)
+router.post('/:room_id/rank-run-ddl', authenticateToken, authorizeRole([1]), async (req, res) => {
+    const { room_id } = req.params;
+    const { sql } = req.body;
+    const userId = req.user.user_id;
+
+    const validationError = validateDdlQuery(sql);
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    let conn;
+    try {
+        const [membership] = await systemDB.query(
+            `SELECT 1 FROM room_students WHERE room_id = ? AND student_id = ? AND status = 'Approved'`,
+            [room_id, userId]
+        );
+        if (!membership.length) return res.status(403).json({ error: 'Not enrolled in this room.' });
+
+        const { conn: sandboxConn } = await getRankedSandboxConnection(userId, room_id);
+        conn = sandboxConn;
+
+        try {
+            const [result] = await conn.query(sql);
+            const msg = result.message || `Statement executed. (affected rows: ${result.affectedRows ?? 0})`;
+            res.json({ rows: [], message: msg });
+        } catch (e) {
+            res.status(400).json({ error: e.message });
+        }
+    } catch (e) {
+        console.error('rank-run-ddl error:', e);
+        res.status(500).json({ error: 'Server error' });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+// POST /rooms/:room_id/rank-submit-ddl — Submit DDL answer
+router.post('/:room_id/rank-submit-ddl', authenticateToken, authorizeRole([1]), async (req, res) => {
+    const { room_id } = req.params;
+    const { sql } = req.body;
+    const userId = req.user.user_id;
+
+    const validationError = validateDdlQuery(sql);
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    try {
+        const [sessionRows] = await systemDB.query(`
+            SELECT gs.session_id, gs.case_id, c.base_points
+            FROM game_sessions gs
+            JOIN cases c ON c.case_id = gs.case_id
+            WHERE gs.room_id = ? AND gs.status = 'Active'
+            LIMIT 1
+        `, [room_id]);
+
+        if (!sessionRows.length) return res.status(404).json({ error: 'No active session found.' });
+
+        const { session_id, case_id, base_points } = sessionRows[0];
+
+        let is_correct = false;
+        let feedback = 'Incorrect. Check your DDL and try again.';
+        let score_awarded = 0;
+
+        try {
+            const result = await submissionService.evaluateSubmission({
+                userId, caseId: case_id, sessionId: session_id,
+                query: sql, sqlType: 'DDL'
+            });
+            is_correct = result.is_correct;
+            feedback = result.feedback;
+            score_awarded = result.score_awarded || 0;
+        } catch {
+            feedback = 'Submission recorded. Evaluation pending.';
+        }
+
+        if (is_correct) {
+            await systemDB.query(`
+                INSERT INTO student_sessions (student_id, session_id, score, submitted_at, is_correct)
+                VALUES (?, ?, ?, NOW(), 1)
+                ON DUPLICATE KEY UPDATE score = VALUES(score), submitted_at = NOW(), is_correct = 1
+            `, [userId, session_id, score_awarded]);
+
+            if (score_awarded > 0) {
+                await submissionService.updateUserProgress(
+                    systemDB,
+                    userId,
+                    case_id,
+                    score_awarded,
+                    true
+                );
+            }
+        }
+
+        res.json({ is_correct, feedback, score_awarded });
+    } catch (e) {
+        console.error('rank-submit-ddl error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+module.exports = router;
