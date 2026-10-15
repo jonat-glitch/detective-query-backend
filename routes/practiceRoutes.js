@@ -170,6 +170,109 @@ router.get('/status-bulk', authenticateToken, authorizeRole([1]), async (req, re
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// GET /practice/curriculum-progress  —  Get module-by-module curriculum roadmap progress
+// ══════════════════════════════════════════════════════════════════════════════
+router.get('/curriculum-progress', authenticateToken, authorizeRole([1]), async (req, res) => {
+    try {
+        const userId = req.user.user_id;
+        const requestedMode = req.query.mode && req.query.mode.toLowerCase() === 'rank' ? 'Rank' : 'Practice';
+
+        const [rows] = await systemDB.query(
+            `SELECT 
+                c.sql_type,
+                c.module_order,
+                COUNT(DISTINCT c.case_id) AS total_cases,
+                COALESCE(SUM(c.base_points), 0) AS total_points,
+                COUNT(DISTINCT CASE WHEN ucp.status = 'Completed' THEN c.case_id END) AS completed_cases,
+                COALESCE(SUM(CASE WHEN ucp.status = 'Completed' THEN c.base_points END), 0) AS points_earned
+            FROM cases c
+            LEFT JOIN user_case_progress ucp 
+                ON c.case_id = ucp.case_id AND ucp.user_id = ?
+            WHERE c.is_active = 1 AND c.mode = ?
+            GROUP BY c.sql_type, c.module_order
+            ORDER BY c.module_order ASC`,
+            [userId, requestedMode]
+        );
+
+        const defaultModules = [
+            { sql_type: 'DDL', module_order: 1, key: 'ddl', title: 'Archive Architecture', subtitle: 'Schema Definition Bureau' },
+            { sql_type: 'DML', module_order: 2, key: 'dml', title: 'Crime Scene Alteration', subtitle: 'Data Manipulation Unit' },
+            { sql_type: 'DQL', module_order: 3, key: 'dql', title: 'Detective Case Files', subtitle: 'Homicide & Investigation Div.' },
+        ];
+
+        let prevCompleted = true;
+        let currentModuleKey = 'ddl';
+        let totalAllCases = 0;
+        let totalCompletedCases = 0;
+
+        const modules = defaultModules.map((def) => {
+            const found = rows.find(r => r.sql_type === def.sql_type) || {};
+            const totalCases = Number(found.total_cases) || 0;
+            const completedCases = Number(found.completed_cases) || 0;
+            const totalPoints = Number(found.total_points) || 0;
+            const pointsEarned = Number(found.points_earned) || 0;
+
+            totalAllCases += totalCases;
+            totalCompletedCases += completedCases;
+
+            const isDone = totalCases > 0 ? (completedCases >= totalCases) : false;
+
+            let status = 'upcoming';
+            let unlockRequirement = null;
+
+            if (isDone) {
+                status = 'completed';
+            } else if (completedCases > 0) {
+                // Student has already started/solved tasks in this module — always keep accessible
+                status = 'current';
+            } else if (prevCompleted) {
+                status = 'current';
+                currentModuleKey = def.key;
+            } else {
+                status = 'upcoming';
+                if (def.sql_type === 'DML') unlockRequirement = 'Complete Archive Architecture (DDL) first';
+                if (def.sql_type === 'DQL') unlockRequirement = 'Complete Crime Scene Alteration (DML) first';
+            }
+
+            prevCompleted = isDone;
+
+            return {
+                key: def.key,
+                sql_type: def.sql_type,
+                module_order: def.module_order,
+                title: def.title,
+                subtitle: def.subtitle,
+                total_cases: totalCases,
+                completed_cases: completedCases,
+                total_points: totalPoints,
+                points_earned: pointsEarned,
+                status,
+                unlock_requirement: unlockRequirement,
+                progress_pct: totalCases > 0 ? Math.round((completedCases / totalCases) * 100) : 0
+            };
+        });
+
+        if (modules.every(m => m.status === 'completed')) {
+            currentModuleKey = 'dql';
+        }
+
+        const overallProgressPct = totalAllCases > 0 ? Math.round((totalCompletedCases / totalAllCases) * 100) : 0;
+
+        res.json({
+            modules,
+            current_module: currentModuleKey,
+            total_cases: totalAllCases,
+            completed_cases: totalCompletedCases,
+            overall_progress_pct: overallProgressPct
+        });
+
+    } catch (err) {
+        console.error('curriculum-progress error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // POST /practice/run  —  Preview (no submission recorded)
 // ══════════════════════════════════════════════════════════════════════════════
 router.post('/run', authenticateToken, authorizeRole([1]), async (req, res) => {
@@ -231,6 +334,17 @@ router.post('/run', authenticateToken, authorizeRole([1]), async (req, res) => {
                     previewRows = rows;
                 } catch (e) {
                     console.warn('Preview validation query error:', e.message);
+                    if (e.code === 'ER_NO_SUCH_TABLE' || (e.message && e.message.includes("doesn't exist"))) {
+                        try {
+                            const [existingTables] = await connection.query('SHOW TABLES');
+                            const tableNames = existingTables.map(t => Object.values(t)[0]);
+                            if (tableNames.length > 0) {
+                                const createdTable = tableNames[tableNames.length - 1];
+                                const [userCols] = await connection.query(`SHOW COLUMNS FROM \`${createdTable}\``);
+                                previewRows = userCols;
+                            }
+                        } catch (_) {}
+                    }
                 }
             }
         }
@@ -281,6 +395,7 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
         let actualRows = [];
         let expectedRows = [];
         let is_correct = false;
+        let validationErrorMessage = null;
 
         if (c.sql_type === 'DQL') {
             const dbName = await recreateStudentDatabase(userId);
@@ -348,6 +463,36 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
                     actualRows = actRows;
                 } catch (e) {
                     console.warn('Actual state validation error:', e.message);
+                    validationErrorMessage = e.message;
+
+                    // Table not found check (e.g. Table 'witnesses' doesn't exist)
+                    if (e.code === 'ER_NO_SUCH_TABLE' || (e.message && e.message.includes("doesn't exist"))) {
+                        try {
+                            const [existingTables] = await connection.query('SHOW TABLES');
+                            const tableNames = existingTables.map(t => Object.values(t)[0]);
+
+                            // Extract expected table name from expected_result_sql
+                            const targetMatch = c.expected_result_sql.match(/(?:from|table|describe)\s+([`\w]+)/i);
+                            const expectedTable = targetMatch ? targetMatch[1].replace(/[`]/g, '') : null;
+
+                            if (tableNames.length > 0) {
+                                const createdTable = tableNames[tableNames.length - 1];
+                                if (expectedTable && createdTable && createdTable.toLowerCase() !== expectedTable.toLowerCase()) {
+                                    validationErrorMessage = `Expected table '${expectedTable}' was not found. You created table '${createdTable}' instead. Please rename or recreate it as '${expectedTable}'!`;
+                                } else {
+                                    validationErrorMessage = `Expected table '${expectedTable || 'required'}' does not exist in your database.`;
+                                }
+
+                                // Load columns from user-created table so actual_rows shows in UI
+                                try {
+                                    const [userCols] = await connection.query(`SHOW COLUMNS FROM \`${createdTable}\``);
+                                    actualRows = userCols;
+                                } catch (_) {}
+                            } else {
+                                validationErrorMessage = `Table '${expectedTable || 'required'}' was not created. Ensure your CREATE TABLE statement executes successfully.`;
+                            }
+                        } catch (_) {}
+                    }
                 }
 
                 is_correct = expectedRows.length > 0
@@ -386,12 +531,21 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
             );
         }
 
+        let feedback = '';
+        if (is_correct) {
+            feedback = `✅ Correct! Task completed and locked. (+${score} XP)`;
+        } else if (validationErrorMessage) {
+            feedback = `❌ ${validationErrorMessage}`;
+        } else if (expectedRows.length > 0 && actualRows.length > 0) {
+            feedback = '❌ Structure or data mismatch: Your result does not match the expected blueprint. Check column names, types, and constraints.';
+        } else {
+            feedback = '❌ Not quite. Review the expected result and try again.';
+        }
+
         res.json({
             is_correct,
             score_awarded: score,
-            feedback: is_correct
-                ? `✅ Correct! Task completed and locked. (+${score} XP)`
-                : '❌ Not quite. Review the expected result and try again.',
+            feedback,
             actual_rows: actualRows,
             expected_rows: expectedRows
         });

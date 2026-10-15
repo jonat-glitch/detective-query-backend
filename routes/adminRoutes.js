@@ -261,6 +261,7 @@ router.get("/cases", async (req, res) => {
         c.is_active,
         c.difficulty_id,
         c.sql_type,
+        c.module_order,
         c.mode,
         c.correct_query,
         c.unlock_xp_required,
@@ -269,7 +270,7 @@ router.get("/cases", async (req, res) => {
         (SELECT COUNT(*) FROM attempts a WHERE a.case_id = c.case_id AND a.is_correct = 1) AS solved_count
       FROM cases c
       LEFT JOIN difficulty d ON c.difficulty_id = d.difficulty_id
-      ORDER BY c.difficulty_id ASC, c.case_id ASC
+      ORDER BY c.module_order ASC, c.difficulty_id ASC, c.case_id ASC
     `);
 
     res.json(cases);
