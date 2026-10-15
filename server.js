@@ -355,6 +355,22 @@ app.get('/api/test-playground', async (req, res) => {
     }
 });
 
+/* ================= HEALTH CHECK ================= */
+// Lightweight endpoint used by uptime monitors and the self-keepalive ping
+app.get('/health', async (req, res) => {
+    try {
+        const [[{ now }]] = await systemDB.query('SELECT NOW() AS now');
+        res.json({
+            status: 'ok',
+            uptime: Math.floor(process.uptime()),
+            dbTime: now,
+            version: process.env.npm_package_version || '1.0.0'
+        });
+    } catch (err) {
+        res.status(503).json({ status: 'degraded', error: err.message });
+    }
+});
+
 /* ================= ERROR HANDLER ================= */
 app.use(errorHandler);
 
@@ -363,4 +379,27 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
+
+    // ── Self-Ping Keepalive (prevents Render free-tier cold starts) ──────────
+    // Pings /health every 13 minutes so the dyno stays warm during demos.
+    // Only runs in production (RENDER env var is set automatically by Render).
+    if (process.env.RENDER) {
+        const SELF_URL = process.env.RENDER_EXTERNAL_URL || `https://detective-query-backend.onrender.com`;
+        const PING_INTERVAL_MS = 13 * 60 * 1000; // 13 minutes
+
+        setInterval(async () => {
+            try {
+                const http = require('https');
+                http.get(`${SELF_URL}/health`, (res) => {
+                    console.log(`[Keepalive] Ping OK — status ${res.statusCode}`);
+                }).on('error', (err) => {
+                    console.warn('[Keepalive] Ping failed:', err.message);
+                });
+            } catch (e) {
+                console.warn('[Keepalive] Ping error:', e.message);
+            }
+        }, PING_INTERVAL_MS);
+
+        console.log(`[Keepalive] Self-ping active every 13 min → ${SELF_URL}/health`);
+    }
 });
