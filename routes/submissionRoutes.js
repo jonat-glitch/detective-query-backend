@@ -167,19 +167,23 @@ function rowsMatchSubset(studentRows, expectedRows) {
 }
 
 async function enforceSessionTime(session, userId, room_id) {
+    if (session.is_paused === 1) {
+        return { allowed: false, error: "The game session is currently paused by the teacher." };
+    }
+
     // Get START_SESSION marker and calculate elapsed seconds using DB NOW() to avoid timezone mismatch
     const [rows] = await systemDB.query(
         `SELECT 
             attempt_date,
-            TIMESTAMPDIFF(SECOND, attempt_date, NOW()) AS elapsed_seconds,
-            TIMESTAMPDIFF(SECOND, NOW(), ?) AS room_remaining_seconds
+            GREATEST(0, TIMESTAMPDIFF(SECOND, attempt_date, NOW()) - COALESCE(?, 0)) AS elapsed_seconds,
+            GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), ?)) AS room_remaining_seconds
          FROM attempts
          WHERE user_id = ?
          AND session_id = ?
          AND sql_query = 'START_SESSION'
          ORDER BY attempt_date DESC
          LIMIT 1`,
-        [session.end_time || '2099-12-31', userId, session.session_id]
+        [session.paused_seconds || 0, session.end_time || '2099-12-31', userId, session.session_id]
     );
 
     if (rows.length === 0) {
@@ -545,6 +549,7 @@ router.post('/submit-rank', authenticateToken, async (req, res) => {
              JOIN cases c ON gs.case_id = c.case_id
              WHERE gs.room_id = ?
              AND gs.status = 'Active'
+             AND (gs.end_time > NOW() OR gs.is_paused = 1)
              LIMIT 1`,
             [room_id]
         );
@@ -577,68 +582,10 @@ router.post('/submit-rank', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Not approved in this room" });
         }
 
-        // ===============================
-        // ⏳ PERSONAL TIMER CHECK
-        // ===============================
-
-        // Get first attempt (start marker)
-        const [firstAttempt] = await systemDB.query(
-            `SELECT attempt_date FROM attempts
-            WHERE user_id = ?
-            AND session_id = ?
-            AND mode = 'Rank'
-            AND sql_query = 'START_SESSION'
-            LIMIT 1`,
-            [userId, session.session_id]
-        );
-
-        if (firstAttempt.length === 0) {
-            return res.status(400).json({ error: "You must start the session first." });
-        }
-
-        const personalStart = new Date(firstAttempt[0].attempt_date);
-        const personalLimitMs = session.personal_time_limit * 60 * 1000;
-
-        const personalDeadline = new Date(personalStart.getTime() + personalLimitMs);
-
-        const globalDeadline = session.end_time
-            ? new Date(session.end_time)
-            : new Date(9999999999999);
-
-        // Effective deadline = earlier one
-        const effectiveDeadline =
-            personalDeadline < globalDeadline
-                ? personalDeadline
-                : globalDeadline;
-
-        if (new Date() > effectiveDeadline) {
-
-            // 🔍 Check if already marked expired
-            const [expired] = await systemDB.query(
-                `SELECT 1 FROM attempts
-                WHERE user_id = ?
-                AND session_id = ?
-                AND sql_query = 'TIME_EXPIRED'
-                LIMIT 1`,
-                [userId, session.session_id]
-            );
-
-            if (expired.length === 0) {
-                await systemDB.query(
-                    `INSERT INTO attempts
-                    (user_id, case_id, sql_query, is_correct, score_awarded, time_taken, room_id, session_id, mode)
-                    VALUES (?, ?, 'TIME_EXPIRED', 0, 0, ?, ?, ?, 'Rank')`,
-                    [
-                        userId,
-                        session.case_id,
-                        Math.floor((new Date() - personalStart) / 1000),
-                        room_id,
-                        session.session_id
-                    ]
-                );
-            }
-
-            return res.status(400).json({ error: "Your time is up." });
+        // ⏳ Enforce session time using pause-aware check
+        const timeCheck = await enforceSessionTime(session, userId, room_id);
+        if (!timeCheck.allowed) {
+            return res.status(403).json({ error: timeCheck.error });
         }
 
         // 🔒 Rank Cooldown (5 seconds)
@@ -823,21 +770,27 @@ router.post('/rank/start', authenticateToken, async (req, res) => {
 
         // Get active session
         const [sessions] = await systemDB.query(
-            `SELECT * FROM game_sessions gs
+            `SELECT gs.*,
+                    CASE 
+                        WHEN gs.is_paused = 1 THEN GREATEST(0, TIMESTAMPDIFF(SECOND, gs.paused_at, gs.end_time))
+                        ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), gs.end_time))
+                    END AS remaining_seconds
+             FROM game_sessions gs
              WHERE room_id = ?
              AND gs.status = 'Active'
+             AND (gs.end_time > NOW() OR gs.is_paused = 1)
              LIMIT 1`,
             [room_id]
         );
 
         if (sessions.length === 0) {
-            return res.status(400).json({ error: "No active game" });
+            return res.status(400).json({ error: "Game already ended" });
         }
 
         const session = sessions[0];
 
         // 🔒 Prevent starting if global session already ended
-        if (new Date() > new Date(session.end_time)) {
+        if (Number(session.remaining_seconds) <= 0) {
             return res.status(400).json({ error: "Game already ended" });
         }
 
@@ -896,9 +849,15 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
 
         // 1️⃣ Get active session
         const [sessions] = await systemDB.query(
-            `SELECT * FROM game_sessions gs
+            `SELECT gs.*,
+                    CASE 
+                        WHEN gs.is_paused = 1 THEN GREATEST(0, TIMESTAMPDIFF(SECOND, gs.paused_at, gs.end_time))
+                        ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), gs.end_time))
+                    END AS room_remaining_seconds
+             FROM game_sessions gs
              WHERE room_id = ?
              AND gs.status = 'Active'
+             AND (gs.end_time > NOW() OR gs.is_paused = 1)
              LIMIT 1`,
             [room_id]
         );
@@ -942,11 +901,14 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
         const lastCorrectSql = hasCorrectQuery ? correctAttempts[0].sql_query : null;
 
         // 3️⃣ Check if student started and calculate remaining time using DB NOW()
+        const isPaused = session.is_paused === 1;
         const [startRows] = await systemDB.query(
             `SELECT 
                 attempt_date,
-                TIMESTAMPDIFF(SECOND, attempt_date, NOW()) AS elapsed_seconds,
-                TIMESTAMPDIFF(SECOND, NOW(), ?) AS room_remaining_seconds
+                CASE 
+                    WHEN ? = 1 THEN GREATEST(0, TIMESTAMPDIFF(SECOND, attempt_date, ?) - COALESCE(?, 0))
+                    ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, attempt_date, NOW()) - COALESCE(?, 0))
+                END AS elapsed_seconds
              FROM attempts
              WHERE user_id = ?
              AND session_id = ?
@@ -954,13 +916,22 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
              AND sql_query = 'START_SESSION'
              ORDER BY attempt_date DESC
              LIMIT 1`,
-            [session.end_time || '2099-12-31', userId, session.session_id]
+            [
+                isPaused ? 1 : 0,
+                session.paused_at || session.end_time,
+                session.paused_seconds || 0,
+                session.paused_seconds || 0,
+                userId,
+                session.session_id
+            ]
         );
 
         if (startRows.length === 0) {
             return res.json({
                 hasActiveSession: true,
                 hasStarted: false,
+                is_paused: isPaused,
+                remaining_seconds: Number(session.room_remaining_seconds) || 0,
                 alreadySolved,
                 hasSubmittedFinal,
                 isFinished: hasSubmittedFinal,
@@ -972,13 +943,13 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
             });
         }
 
-        const { attempt_date, elapsed_seconds, room_remaining_seconds } = startRows[0];
+        const { attempt_date, elapsed_seconds } = startRows[0];
         const personalStart = attempt_date;
         const personalLimitSeconds = (session.personal_time_limit || 60) * 60;
         const remainingPersonalSeconds = Math.max(0, personalLimitSeconds - Math.max(0, elapsed_seconds));
-        const remainingRoomSeconds = session.end_time ? Math.max(0, room_remaining_seconds) : 9999999;
+        const remainingRoomSeconds = session.end_time ? Math.max(0, Number(session.room_remaining_seconds) || 0) : 9999999;
         const effectiveRemainingSeconds = Math.min(remainingPersonalSeconds, remainingRoomSeconds);
-        const isTimeExpired = effectiveRemainingSeconds <= 0;
+        const isTimeExpired = !isPaused && effectiveRemainingSeconds <= 0;
         const effectiveDeadline = new Date(Date.now() + effectiveRemainingSeconds * 1000);
 
         if (isTimeExpired) {
@@ -1499,11 +1470,16 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
 
         // 1️⃣ Get active session
         const [sessions] = await systemDB.query(
-            `SELECT gs.*, c.correct_suspect_id, c.base_points, c.sql_type
+            `SELECT gs.*, c.correct_suspect_id, c.base_points, c.sql_type,
+                    CASE 
+                        WHEN gs.is_paused = 1 THEN GREATEST(0, TIMESTAMPDIFF(SECOND, gs.paused_at, gs.end_time))
+                        ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), gs.end_time))
+                    END AS room_remaining_seconds
              FROM game_sessions gs
              JOIN cases c ON gs.case_id = c.case_id
              WHERE gs.room_id = ?
              AND gs.status = 'Active'
+             AND (gs.end_time > NOW() OR gs.is_paused = 1)
              LIMIT 1`,
             [room_id]
         );
@@ -1535,30 +1511,40 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
         }
 
         // 3️⃣ CHECK PERSONAL + GLOBAL TIMER USING DB NOW()
+        const isPaused = session.is_paused === 1;
         const [timeRows] = await systemDB.query(
             `SELECT 
                 attempt_date,
-                TIMESTAMPDIFF(SECOND, attempt_date, NOW()) AS elapsed_seconds,
-                TIMESTAMPDIFF(SECOND, NOW(), ?) AS room_remaining_seconds
+                CASE 
+                    WHEN ? = 1 THEN GREATEST(0, TIMESTAMPDIFF(SECOND, attempt_date, ?) - COALESCE(?, 0))
+                    ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, attempt_date, NOW()) - COALESCE(?, 0))
+                END AS elapsed_seconds
              FROM attempts
              WHERE user_id = ?
              AND session_id = ?
              AND sql_query = 'START_SESSION'
              ORDER BY attempt_date DESC
              LIMIT 1`,
-            [session.end_time || '2099-12-31', userId, session.session_id]
+            [
+                isPaused ? 1 : 0,
+                session.paused_at || session.end_time,
+                session.paused_seconds || 0,
+                session.paused_seconds || 0,
+                userId,
+                session.session_id
+            ]
         );
 
         if (timeRows.length === 0) {
             return res.status(400).json({ error: "You must start the session first." });
         }
 
-        const { elapsed_seconds, room_remaining_seconds } = timeRows[0];
+        const { elapsed_seconds } = timeRows[0];
         const personalLimitSeconds = (session.personal_time_limit || 60) * 60;
         const remainingPersonalSeconds = Math.max(0, personalLimitSeconds - Math.max(0, elapsed_seconds));
-        const remainingRoomSeconds = session.end_time ? Math.max(0, room_remaining_seconds) : 9999999;
+        const remainingRoomSeconds = session.end_time ? Math.max(0, Number(session.room_remaining_seconds) || 0) : 9999999;
         const effectiveRemainingSeconds = Math.min(remainingPersonalSeconds, remainingRoomSeconds);
-        const isTimeExpired = effectiveRemainingSeconds <= 0;
+        const isTimeExpired = !isPaused && effectiveRemainingSeconds <= 0;
 
         // 🚨 BLOCK if expired
         if (isTimeExpired) {

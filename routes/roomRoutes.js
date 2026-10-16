@@ -474,11 +474,11 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
       try {
         const studentId = req.user.user_id;
 
-        // Auto-end expired sessions first
+        // Auto-end expired sessions first (only if not paused)
         await systemDB.query(`
           UPDATE game_sessions
           SET status = 'Ended'
-          WHERE (status = 'Active' OR LOWER(status) = 'active') AND end_time <= NOW()
+          WHERE (status = 'Active' OR LOWER(status) = 'active') AND is_paused = 0 AND end_time <= NOW()
         `);
 
         const [rooms] = await systemDB.query(`
@@ -489,7 +489,7 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
             u.full_name AS teacher_name,
 
             CASE
-              WHEN MAX(gs.status) = 'Active' AND MAX(gs.end_time) <= NOW() THEN 'ended'
+              WHEN MAX(gs.status) = 'Active' AND MAX(gs.is_paused) = 0 AND MAX(gs.end_time) <= NOW() THEN 'ended'
               WHEN MAX(gs.status) IS NOT NULL THEN LOWER(MAX(gs.status))
               ELSE 'scheduled'
             END AS status,
