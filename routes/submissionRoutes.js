@@ -926,6 +926,21 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
         const finalAnswer = hasSubmittedFinal ? finalAttempts[0].final_answer : null;
         const finalScore = hasSubmittedFinal ? Number(finalAttempts[0].score_awarded) : 0;
 
+        // Check if student has already successfully validated a query in this session
+        const [correctAttempts] = await systemDB.query(
+            `SELECT score_awarded, sql_query, attempt_date FROM attempts
+             WHERE user_id = ?
+             AND session_id = ?
+             AND mode = 'Rank'
+             AND is_correct = 1
+             ORDER BY attempt_id DESC
+             LIMIT 1`,
+            [userId, session.session_id]
+        );
+        const hasCorrectQuery = correctAttempts.length > 0;
+        const queryScore = hasCorrectQuery ? Number(correctAttempts[0].score_awarded) : 0;
+        const lastCorrectSql = hasCorrectQuery ? correctAttempts[0].sql_query : null;
+
         // 3️⃣ Check if student started and calculate remaining time using DB NOW()
         const [startRows] = await systemDB.query(
             `SELECT 
@@ -950,7 +965,10 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
                 hasSubmittedFinal,
                 isFinished: hasSubmittedFinal,
                 finalAnswer,
-                finalScore
+                finalScore,
+                hasCorrectQuery,
+                queryScore,
+                lastCorrectSql
             });
         }
 
@@ -999,6 +1017,9 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
                 isFinished: true,
                 finalAnswer,
                 finalScore,
+                hasCorrectQuery,
+                queryScore,
+                lastCorrectSql,
                 personalStart,
                 effectiveDeadline,
                 session_id: session.session_id,
@@ -1015,6 +1036,9 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
             isFinished: hasSubmittedFinal,
             finalAnswer,
             finalScore,
+            hasCorrectQuery,
+            queryScore,
+            lastCorrectSql,
             personalStart,
             effectiveDeadline,
             session_id: session.session_id,
@@ -1362,12 +1386,16 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             [userId, session.case_id, sql_query.substring(0, 1000), overallCorrect ? 1 : 0, overallCorrect ? session.base_points : 0, room_id, session.session_id]
         );
 
+        const earnedPoints = overallCorrect ? (Number(session.base_points) || 100) : objectivePoints;
+
         res.json({
             rows,
             executionTime,
             objectivePoints,
             newlyCompletedCount,
-            isCorrect: overallCorrect
+            isCorrect: overallCorrect,
+            earnedPoints,
+            basePoints: Number(session.base_points) || 100
         });
 
     } catch (error) {
