@@ -1632,13 +1632,14 @@ router.get('/rank/suspects/:room_id',
         // 👤 Fetch suspects with multiple schema fallbacks
         let suspects = [];
         const queries = [
+            `SELECT suspect_id AS person_id, name, age, status FROM suspects`,
+            `SELECT suspect_id AS person_id, name FROM suspects`,
+            `SELECT id AS person_id, name FROM suspects`,
             `SELECT person_id, name, role FROM persons`,
             `SELECT person_id, name FROM persons`,
             `SELECT id AS person_id, name FROM persons`,
             `SELECT id AS person_id, name FROM person`,
-            `SELECT person_id, name FROM person`,
-            `SELECT id AS person_id, name FROM suspects`,
-            `SELECT suspect_id AS person_id, name FROM suspects`
+            `SELECT person_id, name FROM person`
         ];
 
         for (const q of queries) {

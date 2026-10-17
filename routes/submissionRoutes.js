@@ -1222,6 +1222,18 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             } else {
                 const [result] = await playgroundDB.query(sql_query);
                 rows = result;
+
+                // For DQL cases: validate against case's correct_query
+                if (session.correct_query) {
+                    try {
+                        const [expectedResult] = await playgroundDB.query(session.correct_query);
+                        if (rowsMatch(rows, expectedResult)) {
+                            overallCorrect = true;
+                        }
+                    } catch (e) {
+                        console.error("DQL correct query check error:", e.message);
+                    }
+                }
             }
 
             // ===============================
@@ -1349,6 +1361,11 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
 
         const objectivePoints = Number(progress[0].totalPoints) || 0;
         const newlyCompletedCount = (Number(progress[0].completedCount) || 0) - prevCompletedCount;
+
+        // If overallCorrect is true or all objectives are completed, ensure overallCorrect is true
+        if (objectives.length > 0 && Number(progress[0].completedCount) === objectives.length) {
+            overallCorrect = true;
+        }
 
         // Save attempt log
         await systemDB.query(
