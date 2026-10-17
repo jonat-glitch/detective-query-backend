@@ -1170,6 +1170,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
         const isDql = (session.sql_type || 'DQL') === 'DQL';
         let overallCorrect = false;
         let prevCompletedCount = 0;
+        let objectives = [];
 
         try {
             if (!isDql) {
@@ -1239,12 +1240,13 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             // ===============================
             // 🎯 OBJECTIVE AUTO-CHECK
             // ===============================
-            const [objectives] = await systemDB.query(
+            const [fetchedObjectives] = await systemDB.query(
                 `SELECT * FROM case_objectives
                  WHERE case_id = ?
                  ORDER BY objective_order ASC`,
                 [session.case_id]
             );
+            objectives = fetchedObjectives;
 
             // Count objectives already completed BEFORE this submission
             const [prevCompleted] = await systemDB.query(
