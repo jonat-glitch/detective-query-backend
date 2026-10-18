@@ -1420,19 +1420,30 @@ router.get('/rank/schema/:room_id', authenticateToken, async (req, res) => {
 
         const session = sessions[0];
 
-        const timeCheck = await enforceSessionTime(session, userId, room_id);
-        if (!timeCheck.allowed) {
-            return res.status(403).json({ error: timeCheck.error });
+        // Check room membership for student
+        if (req.user.role_id !== 2) {
+            const [member] = await systemDB.query(
+                `SELECT 1 FROM room_students WHERE room_id = ? AND student_id = ? AND status = 'Approved'`,
+                [room_id, userId]
+            );
+            if (member.length === 0) {
+                return res.status(403).json({ error: "Access denied" });
+            }
         }
 
-        if (!session.dataset_id) {
+        // Verify session is active and not expired
+        if (session.end_time && new Date(session.end_time) < new Date() && !session.is_paused) {
+            return res.status(403).json({ error: "Session has ended." });
+        }
+
+        if (!session.dataset_id && session.sql_type === 'DQL') {
             return res.status(400).json({ error: "Dataset not configured" });
         }
 
         let dbName = 'detective_query_playground';
         if (session.sql_type !== 'DQL') {
             dbName = `playground_user_${userId}`;
-            // If student has not yet run any query in this session, initialize sandbox with case's setup_sql
+            // If student sandbox does not have tables yet or no query run, initialize sandbox with case's setup_sql
             const [existingAttempts] = await systemDB.query(
                 `SELECT 1 FROM attempts 
                  WHERE user_id = ? AND session_id = ? AND sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') 
@@ -1457,7 +1468,7 @@ router.get('/rank/schema/:room_id', authenticateToken, async (req, res) => {
 
         // 3️⃣ Fetch schema from information_schema
         const [columns] = await playgroundDB.query(
-            `SELECT table_name, column_name, data_type
+            `SELECT table_name, column_name, data_type, column_key
              FROM information_schema.columns
              WHERE table_schema = ?
              ORDER BY table_name, ordinal_position`,
@@ -1474,7 +1485,8 @@ router.get('/rank/schema/:room_id', authenticateToken, async (req, res) => {
 
             schema[col.table_name].push({
                 column: col.column_name,
-                type: col.data_type
+                type: col.data_type.toUpperCase(),
+                key: col.column_key === 'PRI' ? 'PK' : null
             });
         }
 
