@@ -993,6 +993,8 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
                 lastCorrectSql,
                 personalStart,
                 effectiveDeadline,
+                effective_remaining_seconds: 0,
+                room_remaining_seconds: remainingRoomSeconds,
                 session_id: session.session_id,
                 case_id: session.case_id
             });
@@ -1012,6 +1014,8 @@ router.get('/rank/status/:room_id', authenticateToken, async (req, res) => {
             lastCorrectSql,
             personalStart,
             effectiveDeadline,
+            effective_remaining_seconds: effectiveRemainingSeconds,
+            room_remaining_seconds: remainingRoomSeconds,
             session_id: session.session_id,
             case_id: session.case_id
         });
