@@ -3,6 +3,7 @@ const router = express.Router();
 const { systemDB, playgroundDB } = require('../db');
 const { authenticateToken, authorizeRole } = require('../middleware/auth');
 const submissionService = require('../services/submissionService');
+const { evaluateSqlResult } = require('../utils/queryEvaluator');
 
 // ─── SQL Validator (DML / DDL only) ──────────────────────────────────────────
 function validatePracticeQuery(query, sqlType) {
@@ -495,26 +496,48 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
                     }
                 }
 
-                is_correct = expectedRows.length > 0
-                    ? rowsMatch(actualRows, expectedRows)
-                    : true;
+                if (validationErrorMessage) {
+                    is_correct = false;
+                } else if (expectedRows.length > 0) {
+                    const evalResult = evaluateSqlResult(c.sql_type, actualRows, expectedRows, c.expected_result_sql);
+                    is_correct = evalResult.is_perfect;
+                    var evaluationResult = evalResult;
+                } else {
+                    is_correct = true;
+                }
             } else {
                 is_correct = true;
             }
         }
 
-        // ── Award XP + lock task on first correct ─────────────────────────────
-        const score = is_correct ? (c.base_points || 50) : 0;
+        // ── Comprehensive evaluation & Partial Star / Score Calculation ────────
+        let evalResult = typeof evaluationResult !== 'undefined' ? evaluationResult : null;
+        if (!evalResult) {
+            evalResult = evaluateSqlResult(c.sql_type, actualRows, expectedRows, c.expected_result_sql);
+            if (is_correct) {
+                evalResult.is_perfect = true;
+                evalResult.stars = 3;
+                evalResult.percentage = 100;
+            }
+        }
+
+        const basePoints = Number(c.base_points) || 50;
+        const percentage = validationErrorMessage ? 0 : (is_correct ? 100 : evalResult.percentage);
+        const stars = validationErrorMessage ? 0 : (is_correct ? 3 : evalResult.stars);
+        const score = Math.round(basePoints * (percentage / 100));
+
+        // Record attempt
         await recordAttempt(userId, case_id, sql_query, is_correct, score);
 
-        if (is_correct) {
-            // Use unified submissionService to update progress, award points/level, handle achievements & streak
+        // Update user progress: locked if 3 stars (100% correct), or partial progress saved if > 0 points
+        if (score > 0) {
             const progressResult = await submissionService.updateUserProgress(
                 systemDB,
                 userId,
                 case_id,
                 score,
-                true
+                is_correct, // true = Completed (locks task), false = In Progress (allows re-attempt to reach 3 stars)
+                true        // allowPartial = true
             );
 
             if (progressResult) {
@@ -532,10 +555,12 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
         }
 
         let feedback = '';
-        if (is_correct) {
-            feedback = `✅ Correct! Task completed and locked. (+${score} XP)`;
-        } else if (validationErrorMessage) {
+        if (validationErrorMessage) {
             feedback = `❌ ${validationErrorMessage}`;
+        } else if (is_correct) {
+            feedback = `🌟 Perfect! All specifications and constraints verified. (+${score} XP)`;
+        } else if (evalResult && evalResult.feedback) {
+            feedback = `${evalResult.feedback} (+${score} XP earned)`;
         } else if (expectedRows.length > 0 && actualRows.length > 0) {
             feedback = '❌ Structure or data mismatch: Your result does not match the expected blueprint. Check column names, types, and constraints.';
         } else {
@@ -544,7 +569,14 @@ router.post('/submit', authenticateToken, authorizeRole([1]), async (req, res) =
 
         res.json({
             is_correct,
+            is_passing: evalResult ? evalResult.is_passing : is_correct,
+            percentage,
+            stars,
             score_awarded: score,
+            base_points: basePoints,
+            checks: evalResult ? evalResult.checks : [],
+            missing_items: evalResult ? evalResult.missingItems : [],
+            passed_items: evalResult ? evalResult.passedItems : [],
             feedback,
             actual_rows: actualRows,
             expected_rows: expectedRows

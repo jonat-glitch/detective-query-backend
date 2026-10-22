@@ -103,8 +103,6 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
-app.use('/uploads', express.static(uploadsDir));
-
 // ── Resilient Fallbacks for Ephemeral Cloud Storage (e.g. Render redeploys/restarts) ──
 app.get('/uploads/study-material-:caseId.pdf', async (req, res, next) => {
     try {
@@ -113,6 +111,11 @@ app.get('/uploads/study-material-:caseId.pdf', async (req, res, next) => {
             'SELECT file_name, mime_type, file_data FROM case_study_materials WHERE case_id = ?',
             [caseId]
         );
+
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
         if (rows.length > 0 && rows[0].file_data) {
             // Write to local disk cache in background
             const cachedPath = path.join(uploadsDir, `study-material-${caseId}.pdf`);
@@ -137,12 +140,18 @@ app.get('/uploads/avatar-:userId.:ext', async (req, res, next) => {
             'SELECT file_name, mime_type, file_data FROM user_avatars WHERE user_id = ?',
             [userId]
         );
+
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
         if (rows.length > 0 && rows[0].file_data) {
             // Write to local disk cache in background
             const cachedPath = path.join(uploadsDir, `avatar-${userId}.${ext}`);
             try { fs.writeFileSync(cachedPath, rows[0].file_data); } catch (e) {}
 
             res.setHeader('Content-Type', rows[0].mime_type || (ext === 'png' ? 'image/png' : 'image/jpeg'));
+            res.setHeader('Content-Disposition', `inline; filename="${rows[0].file_name || `avatar-${userId}.${ext}`}"`);
             return res.send(rows[0].file_data);
         }
         next();
@@ -151,6 +160,13 @@ app.get('/uploads/avatar-:userId.:ext', async (req, res, next) => {
         next();
     }
 });
+
+app.use('/uploads', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+}, express.static(uploadsDir, { etag: false, lastModified: false }));
 
 app.use('/api', uploadRoutes);
 

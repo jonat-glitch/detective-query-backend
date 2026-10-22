@@ -1066,9 +1066,12 @@ router.get('/active/:room_id',
                     c.mode,
                     c.sql_type,
                     c.base_points,
-                    c.expected_result_sql
+                    c.expected_result_sql,
+                    c.difficulty_id,
+                    COALESCE(d.difficulty_name, CASE c.difficulty_id WHEN 1 THEN 'Beginner' WHEN 2 THEN 'Intermediate' WHEN 3 THEN 'Advanced' ELSE 'Beginner' END) AS difficulty_name
                  FROM game_sessions gs
                  JOIN cases c ON gs.case_id = c.case_id
+                 LEFT JOIN difficulty d ON c.difficulty_id = d.difficulty_id
                  WHERE gs.room_id = ?
                  AND gs.status = 'Active'
                  AND (gs.end_time > NOW() OR gs.is_paused = 1)
@@ -1112,21 +1115,35 @@ router.get('/active/:room_id',
 
             // Check study material PDF (from TiDB persistent storage or disk)
             let hasMaterial = false;
+            let materialVersion = null;
             try {
                 const [matRows] = await systemDB.query(
-                    'SELECT case_id FROM case_study_materials WHERE case_id = ?',
+                    'SELECT case_id, UNIX_TIMESTAMP(updated_at) AS v FROM case_study_materials WHERE case_id = ?',
                     [session.case_id]
                 );
                 const uploadsDir = path.join(__dirname, '../uploads');
                 const pdfPath = path.join(uploadsDir, `study-material-${session.case_id}.pdf`);
-                hasMaterial = matRows.length > 0 || fs.existsSync(pdfPath);
+                if (matRows.length > 0) {
+                    hasMaterial = true;
+                    materialVersion = matRows[0].v || Date.now();
+                } else if (fs.existsSync(pdfPath)) {
+                    hasMaterial = true;
+                    try {
+                        materialVersion = Math.floor(fs.statSync(pdfPath).mtimeMs / 1000);
+                    } catch (e) {
+                        materialVersion = Date.now();
+                    }
+                }
             } catch (matErr) {
                 const uploadsDir = path.join(__dirname, '../uploads');
                 const pdfPath = path.join(uploadsDir, `study-material-${session.case_id}.pdf`);
                 hasMaterial = fs.existsSync(pdfPath);
+                if (hasMaterial) {
+                    try { materialVersion = Math.floor(fs.statSync(pdfPath).mtimeMs / 1000); } catch (e) {}
+                }
             }
             const study_material_url = hasMaterial
-                ? `${req.protocol}://${req.get('host')}/uploads/study-material-${session.case_id}.pdf`
+                ? `${req.protocol}://${req.get('host')}/uploads/study-material-${session.case_id}.pdf?v=${materialVersion || Date.now()}`
                 : null;
 
             // ==============================
@@ -1149,6 +1166,8 @@ router.get('/active/:room_id',
                 sql_type: session.sql_type || 'DQL',
                 base_points: session.base_points || 100,
                 expected_result_sql: session.expected_result_sql || null,
+                difficulty_id: session.difficulty_id || null,
+                difficulty_name: session.difficulty_name || null,
                 objectives,
                 study_material_url
             });

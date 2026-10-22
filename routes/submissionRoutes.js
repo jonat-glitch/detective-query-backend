@@ -2,6 +2,7 @@ const express = require('express');
 const { systemDB, playgroundDB } = require('../db');
 const submissionService = require('../services/submissionService');
 const { authenticateToken } = require('../middleware/auth');
+const { evaluateSqlResult } = require('../utils/queryEvaluator');
 
 const router = express.Router();
 
@@ -1220,9 +1221,11 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
                         console.error("Temp state error:", e.message);
                     }
 
-                    if (rowsMatch(rows, expectedState)) {
+                    const evalResult = evaluateSqlResult(session.sql_type, rows, expectedState, session.expected_result_sql);
+                    if (evalResult.is_perfect) {
                         overallCorrect = true;
                     }
+                    var ddlEvalResult = evalResult;
                 }
             } else {
                 const [result] = await playgroundDB.query(sql_query);
@@ -1373,14 +1376,27 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             overallCorrect = true;
         }
 
+        let calculatedScore = overallCorrect ? (Number(session.base_points) || 100) : objectivePoints;
+        let stars = overallCorrect ? 3 : 0;
+        let percentage = overallCorrect ? 100 : 0;
+
+        if (typeof ddlEvalResult !== 'undefined' && ddlEvalResult) {
+            stars = ddlEvalResult.stars;
+            percentage = ddlEvalResult.percentage;
+            if (!overallCorrect && ddlEvalResult.percentage > 0) {
+                const partialScore = Math.round((Number(session.base_points) || 100) * (ddlEvalResult.percentage / 100));
+                calculatedScore = Math.max(calculatedScore, partialScore);
+            }
+        }
+
         // Save attempt log
         await systemDB.query(
             `INSERT INTO attempts (user_id, case_id, sql_query, is_correct, score_awarded, room_id, session_id, mode)
              VALUES (?, ?, ?, ?, ?, ?, ?, 'Rank')`,
-            [userId, session.case_id, sql_query.substring(0, 1000), overallCorrect ? 1 : 0, overallCorrect ? session.base_points : 0, room_id, session.session_id]
+            [userId, session.case_id, sql_query.substring(0, 1000), overallCorrect ? 1 : (percentage >= 25 ? 1 : 0), calculatedScore, room_id, session.session_id]
         );
 
-        const earnedPoints = overallCorrect ? (Number(session.base_points) || 100) : objectivePoints;
+        const earnedPoints = calculatedScore;
 
         res.json({
             rows,
@@ -1388,6 +1404,12 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
             objectivePoints,
             newlyCompletedCount,
             isCorrect: overallCorrect,
+            isPassing: percentage >= 25,
+            percentage,
+            stars,
+            checks: typeof ddlEvalResult !== 'undefined' && ddlEvalResult ? ddlEvalResult.checks : [],
+            missingItems: typeof ddlEvalResult !== 'undefined' && ddlEvalResult ? ddlEvalResult.missingItems : [],
+            feedback: typeof ddlEvalResult !== 'undefined' && ddlEvalResult ? ddlEvalResult.feedback : null,
             earnedPoints,
             basePoints: Number(session.base_points) || 100
         });
@@ -1501,7 +1523,7 @@ router.get('/rank/schema/:room_id', authenticateToken, async (req, res) => {
 router.post('/rank/submit-final', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.user_id;
-        const { room_id, suspect_id } = req.body;
+        const { room_id, suspect_id, hint_penalty = 0 } = req.body;
 
         // 1️⃣ Get active session
         const [sessions] = await systemDB.query(
@@ -1683,7 +1705,7 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
             // DML/DDL award full base points on successful completion
             totalScore = isCorrect ? session.base_points : 0;
             if (!isCorrect) {
-                // If not fully correct, award partial objective points if any
+                // If not fully correct, award partial objective points or best attempt score
                 const [objectiveRows] = await systemDB.query(
                   `SELECT SUM(points_awarded) AS totalPoints
                    FROM session_objectives
@@ -1693,12 +1715,25 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
                   [session.session_id, userId]
                 );
                 objectivePoints = Number(objectiveRows[0].totalPoints) || 0;
-                totalScore = objectivePoints;
+                
+                const [bestAttempt] = await systemDB.query(
+                    `SELECT MAX(score_awarded) AS maxScore FROM attempts 
+                     WHERE user_id = ? AND session_id = ? AND sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED')`,
+                    [userId, session.session_id]
+                );
+                const attemptScore = Number(bestAttempt[0]?.maxScore) || 0;
+                totalScore = Math.max(objectivePoints, attemptScore);
             } else {
                 objectivePoints = session.base_points;
             }
         }
         
+        // Deduct penalty from hint unlocks if any
+        const penalty = Math.max(0, Number(hint_penalty) || 0);
+        if (penalty > 0 && totalScore > 0) {
+            totalScore = Math.max(0, totalScore - penalty);
+        }
+
         // 5️⃣ Save final attempt
         await systemDB.query(
             `INSERT INTO attempts

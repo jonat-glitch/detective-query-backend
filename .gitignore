@@ -19,3 +19,7 @@ build/
 
 # Optional: editor files
 .vscode/
+
+# Local database backups & temp uploads
+backups/
+uploads/

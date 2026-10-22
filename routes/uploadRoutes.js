@@ -158,7 +158,7 @@ router.get('/upload/study-material/:case_id', authenticateToken, async (req, res
 
         // 1. Check TiDB
         const [rows] = await systemDB.query(
-            'SELECT case_id FROM case_study_materials WHERE case_id = ?',
+            'SELECT case_id, UNIX_TIMESTAMP(updated_at) AS v FROM case_study_materials WHERE case_id = ?',
             [caseId]
         );
 
@@ -169,7 +169,8 @@ router.get('/upload/study-material/:case_id', authenticateToken, async (req, res
             return res.json({ exists: false, pdfUrl: null });
         }
 
-        const pdfUrl = `${req.protocol}://${req.get('host')}/uploads/study-material-${caseId}.pdf`;
+        const v = rows.length > 0 && rows[0].v ? rows[0].v : Date.now();
+        const pdfUrl = `${req.protocol}://${req.get('host')}/uploads/study-material-${caseId}.pdf?v=${v}`;
         res.json({ exists: true, pdfUrl });
     } catch (err) {
         console.error('Error checking study material:', err);
@@ -185,6 +186,11 @@ router.get('/upload/study-material-file/:case_id', async (req, res) => {
             'SELECT file_name, mime_type, file_data FROM case_study_materials WHERE case_id = ?',
             [caseId]
         );
+
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
         if (rows.length > 0 && rows[0].file_data) {
             const cachedPath = path.join(uploadsDir, `study-material-${caseId}.pdf`);
             try { fs.writeFileSync(cachedPath, rows[0].file_data); } catch (e) {}
@@ -253,9 +259,10 @@ router.post('/upload/study-material/:case_id', authenticateToken, authorizeRole(
                 req.user.user_id
             ]);
 
+            const v = Date.now();
             res.json({
                 message: 'Study material uploaded successfully',
-                pdfUrl: `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`
+                pdfUrl: `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}?v=${v}`
             });
         } catch (dbErr) {
             console.error('Failed to save study material to database:', dbErr);

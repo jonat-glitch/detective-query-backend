@@ -86,34 +86,38 @@ async function resetPlayground(datasetId) {
     }
 }
 
-async function updateUserProgress(connection, userId, caseId, score, isCorrect) {
+async function updateUserProgress(connection, userId, caseId, score, isCompleted = true, allowPartial = false) {
 
-    // Only run if student got it correct OR we explicitly want to save progress
-    if (!isCorrect) return null;
+    // Only run if student got it completed OR if partial progress saving is allowed with score > 0
+    if (!isCompleted && (!allowPartial || score <= 0)) return null;
 
     const [existing] = await connection.query(
-        `SELECT highest_score
+        `SELECT highest_score, status
          FROM user_case_progress
          WHERE user_id = ? AND case_id = ?`,
         [userId, caseId]
     );
 
     let previousScore = 0;
+    let existingStatus = 'In Progress';
     if (existing.length > 0) {
         previousScore = existing[0].highest_score || 0;
+        existingStatus = existing[0].status || 'In Progress';
     }
+
+    const finalStatus = isCompleted || existingStatus === 'Completed' ? 'Completed' : 'In Progress';
 
     // Always update/insert progress
     await connection.query(
         `INSERT INTO user_case_progress
          (user_id, case_id, status, highest_score, is_unlocked, completed_at)
-         VALUES (?, ?, 'Completed', ?, 1, NOW())
+         VALUES (?, ?, ?, ?, 1, ${finalStatus === 'Completed' ? 'NOW()' : 'NULL'})
          ON DUPLICATE KEY UPDATE
-            status = 'Completed',
+            status = VALUES(status),
             highest_score = GREATEST(highest_score, VALUES(highest_score)),
             is_unlocked = 1,
-            completed_at = NOW()`,
-        [userId, caseId, score]
+            completed_at = IF(VALUES(status) = 'Completed', COALESCE(completed_at, NOW()), completed_at)`,
+        [userId, caseId, finalStatus, score]
     );
 
     // Only award XP if the student beats their previous high score
