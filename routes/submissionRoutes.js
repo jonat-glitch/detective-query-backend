@@ -1567,18 +1567,27 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: "Suspect ID required." });
         }
 
-        // 2️⃣ Prevent double final submission
+        // 2️⃣ Prevent double final submission (idempotent: return recorded score)
         const [existingFinal] = await systemDB.query(
-            `SELECT 1 FROM attempts
+            `SELECT is_correct, score_awarded FROM attempts
              WHERE user_id = ?
              AND session_id = ?
              AND final_answer IS NOT NULL
+             ORDER BY attempt_id DESC
              LIMIT 1`,
             [userId, session.session_id]
         );
 
         if (existingFinal.length > 0) {
-            return res.status(400).json({ error: "Final answer already submitted." });
+            const isCorrect = Number(existingFinal[0].is_correct) === 1;
+            const totalScore = Number(existingFinal[0].score_awarded) || 0;
+            return res.json({
+                correct: isCorrect,
+                objectivePoints: isCorrect ? totalScore : 0,
+                finalAnswerPoints: 0,
+                totalScore,
+                alreadySubmitted: true
+            });
         }
 
         // 3️⃣ CHECK PERSONAL + GLOBAL TIMER USING DB NOW()

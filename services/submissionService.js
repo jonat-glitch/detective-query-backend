@@ -108,6 +108,7 @@ async function updateUserProgress(connection, userId, caseId, score, isCompleted
     const finalStatus = isCompleted || existingStatus === 'Completed' ? 'Completed' : 'In Progress';
 
     // Always update/insert progress
+    const completedAtClause = finalStatus === 'Completed' ? 'COALESCE(completed_at, NOW())' : 'completed_at';
     await connection.query(
         `INSERT INTO user_case_progress
          (user_id, case_id, status, highest_score, is_unlocked, completed_at)
@@ -116,7 +117,7 @@ async function updateUserProgress(connection, userId, caseId, score, isCompleted
             status = VALUES(status),
             highest_score = GREATEST(highest_score, VALUES(highest_score)),
             is_unlocked = 1,
-            completed_at = IF(VALUES(status) = 'Completed', COALESCE(completed_at, NOW()), completed_at)`,
+            completed_at = ${completedAtClause}`,
         [userId, caseId, finalStatus, score]
     );
 
