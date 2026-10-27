@@ -1334,7 +1334,7 @@ router.get('/cases',
             }
             const [cases] = await systemDB.query(
                 `SELECT case_id, title, description, difficulty_id, sql_type, module_order, mode,
-                        setup_sql, expected_result_sql, dataset_id
+                        setup_sql, expected_result_sql, correct_query, correct_suspect_id, dataset_id
                  FROM cases
                  ${where}
                  ORDER BY module_order, difficulty_id, case_id`,
