@@ -1196,14 +1196,8 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
                     rows = rowsExpected;
                 }
 
-                // If case has no objectives (e.g. DML case 27 or DDL case 28), check overall state correctness
-                const [objectivesCount] = await systemDB.query(
-                    `SELECT COUNT(*) AS count FROM case_objectives WHERE case_id = ?`,
-                    [session.case_id]
-                );
-
-                if (objectivesCount[0].count === 0 && session.expected_result_sql) {
-                    // Check student state vs correct state
+                // Evaluate state correctness and granular metrics (column checks, row checks, etc.)
+                if (session.expected_result_sql && session.expected_result_sql.trim()) {
                     let expectedState = [];
                     const tempDb = `playground_temp_${userId}`;
                     try {
@@ -1380,9 +1374,29 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
         let stars = overallCorrect ? 3 : 0;
         let percentage = overallCorrect ? 100 : 0;
 
+        // Proportional stars & percentage for objective-based cases
+        if (objectives.length > 0 && !overallCorrect) {
+            const completedCount = Number(progress[0].completedCount) || 0;
+            const totalObjs = objectives.length;
+            if (totalObjs > 0) {
+                const ratio = completedCount / totalObjs;
+                percentage = Math.round(ratio * 100);
+                if (ratio >= 0.99) {
+                    stars = 3;
+                } else if (ratio >= 0.5) {
+                    stars = 2;
+                } else if (ratio > 0) {
+                    stars = 1;
+                } else {
+                    stars = 0;
+                }
+            }
+        }
+
+        // Granular column / schema / row evaluator result
         if (typeof ddlEvalResult !== 'undefined' && ddlEvalResult) {
-            stars = ddlEvalResult.stars;
-            percentage = ddlEvalResult.percentage;
+            stars = Math.max(stars, ddlEvalResult.stars || 0);
+            percentage = Math.max(percentage, ddlEvalResult.percentage || 0);
             if (!overallCorrect && ddlEvalResult.percentage > 0) {
                 const partialScore = Math.round((Number(session.base_points) || 100) * (ddlEvalResult.percentage / 100));
                 calculatedScore = Math.max(calculatedScore, partialScore);
