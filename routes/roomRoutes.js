@@ -1878,20 +1878,22 @@ router.get('/completed-cases/:room_id',
                 }
             }
 
-            // Fetch distinct cases that have been run and ended in this room
+            // Fetch distinct cases that have at least 1 correct student attempt in this room
+            // (session-only cases with no correct answers don't count as "completed")
             const [rows] = await systemDB.query(
                 `SELECT 
-                    gs.case_id,
+                    a.case_id,
                     c.title,
                     c.sql_type,
                     c.difficulty_id,
-                    MAX(gs.end_time) AS completed_at,
+                    MAX(a.attempt_date) AS completed_at,
                     COUNT(DISTINCT gs.session_id) AS session_count
-                 FROM game_sessions gs
-                 JOIN cases c ON gs.case_id = c.case_id
-                 WHERE gs.room_id = ?
-                   AND LOWER(gs.status) = 'ended'
-                 GROUP BY gs.case_id, c.title, c.sql_type, c.difficulty_id
+                 FROM attempts a
+                 JOIN cases c ON a.case_id = c.case_id
+                 LEFT JOIN game_sessions gs ON gs.case_id = a.case_id AND gs.room_id = a.room_id AND LOWER(gs.status) = 'ended'
+                 WHERE a.room_id = ?
+                   AND a.is_correct = 1
+                 GROUP BY a.case_id, c.title, c.sql_type, c.difficulty_id
                  ORDER BY completed_at ASC`,
                 [room_id]
             );
@@ -1904,9 +1906,18 @@ router.get('/completed-cases/:room_id',
                 total: rows.length,
             };
 
+            // Also return a list of all sessions run (for context), separately
+            const [sessionRows] = await systemDB.query(
+                `SELECT DISTINCT gs.case_id
+                 FROM game_sessions gs
+                 WHERE gs.room_id = ? AND LOWER(gs.status) = 'ended'`,
+                [room_id]
+            );
+
             res.json({
                 completedCases: rows,
                 completedCaseIds: rows.map(r => r.case_id),
+                sessionCaseIds: sessionRows.map((r) => r.case_id),
                 summary
             });
         } catch (error) {
