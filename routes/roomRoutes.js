@@ -732,6 +732,71 @@ router.post('/reject/:id',
     }
 );
 
+// ── REMOVE / KICK STUDENT FROM ROOM (Teacher or Admin) ───────────────
+router.delete('/:room_id/students/:student_id',
+    authenticateToken,
+    authorizeRole([2, 3]),
+    async (req, res) => {
+        try {
+            const { room_id, student_id } = req.params;
+            const teacherId = req.user.user_id;
+            const roleId = req.user.role_id;
+
+            // Verify teacher owns this room (role 3 admin bypasses ownership check)
+            if (roleId === 2) {
+                const [room] = await systemDB.query(
+                    `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                    [room_id, teacherId]
+                );
+                if (room.length === 0) {
+                    return res.status(403).json({ error: "You do not have permission to manage this room" });
+                }
+            }
+
+            const [result] = await systemDB.query(
+                `DELETE FROM room_students WHERE room_id = ? AND student_id = ?`,
+                [room_id, student_id]
+            );
+
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ error: "Student is not in this room" });
+            }
+
+            res.json({ message: "Student removed from room successfully" });
+        } catch (error) {
+            console.error("REMOVE STUDENT FROM ROOM ERROR:", error);
+            res.status(500).json({ error: "Failed to remove student from room" });
+        }
+    }
+);
+
+// ── LEAVE ROOM (Student) ─────────────────────────────────────────────
+router.post('/:room_id/leave',
+    authenticateToken,
+    authorizeRole([1]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const studentId = req.user.user_id;
+
+            const [result] = await systemDB.query(
+                `DELETE FROM room_students WHERE room_id = ? AND student_id = ?`,
+                [room_id, studentId]
+            );
+
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ error: "You are not enrolled in this room" });
+            }
+
+            res.json({ message: "Left room successfully" });
+        } catch (error) {
+            console.error("LEAVE ROOM ERROR:", error);
+            res.status(500).json({ error: "Failed to leave room" });
+        }
+    }
+);
+
+
 router.get('/:room_id/status',
     authenticateToken,
     authorizeRole([1]),
