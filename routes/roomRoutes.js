@@ -384,13 +384,22 @@ router.get('/my-rooms',
                     console.error('[my-rooms teacher sync]:', syncErr);
                 }
 
-                // Teacher's created rooms (with normalized section, course, semester metadata)
+                // Teacher's created rooms (with normalized section, course, semester metadata, case completions, and session timers)
                 const [rooms] = await systemDB.query(
                     `SELECT r.room_id, r.room_name, r.room_code, r.is_archived, r.archived_at,
                             r.section_id, r.semester_id, r.course_id, r.year_level,
                             s.section_name, c.course_code, c.course_name,
                             sem.school_year, sem.term, sem.is_active AS semester_active,
-                            (SELECT COUNT(DISTINCT rs.student_id) FROM room_students rs WHERE rs.room_id = r.room_id AND rs.status = 'Approved') AS student_count
+                            (SELECT COUNT(DISTINCT rs.student_id) FROM room_students rs WHERE rs.room_id = r.room_id AND rs.status = 'Approved') AS student_count,
+                            (SELECT COUNT(*) FROM room_students rs WHERE rs.room_id = r.room_id AND rs.status = 'Pending') AS pending_count,
+                            (SELECT COUNT(DISTINCT a.case_id) FROM attempts a WHERE a.room_id = r.room_id AND a.is_correct = 1) AS cases_completed,
+                            (SELECT COUNT(DISTINCT a.case_id) FROM attempts a JOIN cases c2 ON c2.case_id = a.case_id WHERE a.room_id = r.room_id AND a.is_correct = 1 AND c2.sql_type = 'DDL') AS ddl_completed,
+                            (SELECT COUNT(DISTINCT a.case_id) FROM attempts a JOIN cases c2 ON c2.case_id = a.case_id WHERE a.room_id = r.room_id AND a.is_correct = 1 AND c2.sql_type = 'DML') AS dml_completed,
+                            (SELECT COUNT(DISTINCT a.case_id) FROM attempts a JOIN cases c2 ON c2.case_id = a.case_id WHERE a.room_id = r.room_id AND a.is_correct = 1 AND c2.sql_type = 'DQL') AS dql_completed,
+                            (SELECT gs.status FROM game_sessions gs WHERE gs.room_id = r.room_id ORDER BY gs.session_id DESC LIMIT 1) AS latest_session_status,
+                            (SELECT gs.is_active FROM game_sessions gs WHERE gs.room_id = r.room_id ORDER BY gs.session_id DESC LIMIT 1) AS latest_session_is_active,
+                            (SELECT TIMESTAMPDIFF(MINUTE, gs.start_time, gs.end_time) FROM game_sessions gs WHERE gs.room_id = r.room_id ORDER BY gs.session_id DESC LIMIT 1) AS latest_room_duration,
+                            (SELECT gs.personal_time_limit FROM game_sessions gs WHERE gs.room_id = r.room_id ORDER BY gs.session_id DESC LIMIT 1) AS latest_student_duration
                      FROM rooms r
                      LEFT JOIN sections s ON s.section_id = r.section_id
                      LEFT JOIN courses c ON c.course_id = r.course_id
@@ -466,6 +475,41 @@ router.get('/teacher/assigned-sections',
         } catch (err) {
             console.error('Fetch teacher assigned sections error:', err);
             res.status(500).json({ error: 'Failed to fetch assigned sections' });
+        }
+    }
+);
+
+// ── Teacher: Fetch aggregate rooms statistics (Class accuracy, total cases completed) ──
+router.get('/teacher/summary-stats',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const teacherId = req.user.user_id;
+            const [stats] = await systemDB.query(`
+                SELECT 
+                    COUNT(a.attempt_id) AS total_attempts,
+                    SUM(CASE WHEN a.is_correct = 1 THEN 1 ELSE 0 END) AS correct_attempts,
+                    COUNT(DISTINCT CASE WHEN a.is_correct = 1 THEN a.case_id END) AS distinct_cases_completed
+                FROM rooms r
+                JOIN attempts a ON a.room_id = r.room_id
+                WHERE r.teacher_id = ? AND (r.is_archived = 0 OR r.is_archived IS NULL)
+            `, [teacherId]);
+
+            const total = Number(stats[0]?.total_attempts || 0);
+            const correct = Number(stats[0]?.correct_attempts || 0);
+            const accuracy = total > 0 ? Math.round((correct / total) * 100) : 0;
+            const casesCompleted = Number(stats[0]?.distinct_cases_completed || 0);
+
+            res.json({
+                accuracy,
+                casesCompleted,
+                totalAttempts: total,
+                correctAttempts: correct
+            });
+        } catch (err) {
+            console.error('Fetch teacher summary stats error:', err);
+            res.status(500).json({ error: 'Failed to fetch summary stats' });
         }
     }
 );
@@ -1583,11 +1627,22 @@ router.get('/students/:room_id',
             const [students] = await systemDB.query(
                 `SELECT DISTINCT u.user_id, u.full_name, u.email, u.student_id, u.section, u.avatar,
                          COALESCE(u.total_points, 0) AS total_points,
-                         COALESCE(u.current_level, 1) AS current_level
+                         COALESCE(u.current_level, 1) AS current_level,
+                         COALESCE((
+                             SELECT SUM(a.score_awarded)
+                             FROM attempts a
+                             WHERE a.room_id = rs.room_id AND a.user_id = u.user_id AND a.is_correct = 1
+                         ), 0) AS room_points,
+                         COALESCE((
+                             SELECT COUNT(DISTINCT a.case_id)
+                             FROM attempts a
+                             WHERE a.room_id = rs.room_id AND a.user_id = u.user_id AND a.is_correct = 1
+                         ), 0) AS room_cases_solved
                  FROM room_students rs
                  JOIN users u ON rs.student_id = u.user_id
                  WHERE rs.room_id = ?
-                 AND rs.status = 'Approved'`,
+                 AND rs.status = 'Approved'
+                 ORDER BY room_points DESC, total_points DESC`,
                 [room_id]
             );
 
