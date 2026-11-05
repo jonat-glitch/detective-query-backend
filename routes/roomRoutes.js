@@ -1340,13 +1340,13 @@ router.get('/leaderboard/:room_id',
                 `SELECT
                     u.user_id,
                     u.full_name,
-                    CAST(COALESCE(fa.score_awarded, so.total_objective_points, 0) AS SIGNED) AS total_score,
+                    CAST(COALESCE(fa.score_awarded, GREATEST(COALESCE(so.total_objective_points, 0), COALESCE(att.max_attempt_score, 0)), 0) AS SIGNED) AS total_score,
                     COALESCE(so.completed_objectives, 0) AS completed_objectives,
                     CASE WHEN fa.is_correct = 1 THEN 1 ELSE 0 END AS solved_cases,
                     MIN(CASE WHEN a.sql_query != 'START_SESSION' AND a.sql_query != 'TIME_EXPIRED' THEN a.time_taken END) AS best_time,
                     RANK() OVER (
                         ORDER BY 
-                            CAST(COALESCE(fa.score_awarded, so.total_objective_points, 0) AS SIGNED) DESC,
+                            CAST(COALESCE(fa.score_awarded, GREATEST(COALESCE(so.total_objective_points, 0), COALESCE(att.max_attempt_score, 0)), 0) AS SIGNED) DESC,
                             COALESCE(so.completed_objectives, 0) DESC,
                             CASE WHEN fa.is_correct = 1 THEN 1 ELSE 0 END DESC
                     ) AS ranking
@@ -1359,6 +1359,12 @@ router.get('/leaderboard/:room_id',
                     GROUP BY user_id
                 ) so ON so.user_id = u.user_id
                 LEFT JOIN (
+                    SELECT user_id, MAX(CASE WHEN sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN score_awarded ELSE 0 END) AS max_attempt_score
+                    FROM attempts
+                    WHERE session_id = ?
+                    GROUP BY user_id
+                ) att ON att.user_id = u.user_id
+                LEFT JOIN (
                     SELECT a1.user_id, a1.score_awarded, a1.is_correct
                     FROM attempts a1
                     WHERE a1.session_id = ? AND a1.final_answer IS NOT NULL
@@ -1369,8 +1375,8 @@ router.get('/leaderboard/:room_id',
                     AND a.mode = 'Rank'
                 WHERE rs.room_id = ?
                 AND rs.status = 'Approved'
-                GROUP BY u.user_id, u.full_name, fa.score_awarded, so.total_objective_points, so.completed_objectives, fa.is_correct`,
-                [sessionId, sessionId, sessionId, room_id]
+                GROUP BY u.user_id, u.full_name, fa.score_awarded, so.total_objective_points, so.completed_objectives, fa.is_correct, att.max_attempt_score`,
+                [sessionId, sessionId, sessionId, sessionId, room_id]
             );
 
             res.json(results);

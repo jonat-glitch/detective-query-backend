@@ -774,7 +774,7 @@ async function main() {
     }
 
     const caseObjs = caseObjectivesMap[r.case_id] || [];
-    const hasProgressiveObjs = caseObjs.length > 0;
+    const hasProgressiveObjs = r.sql_type === 'DQL' && caseObjs.length > 0 && caseObjs.some(obj => obj.expected_query && obj.expected_query.trim().length > 0);
     const suspectInfo = practiceDetectiveNotes[r.case_id] || (r.correct_suspect_id && suspectMap[r.correct_suspect_id] ? {
       suspect_id: r.correct_suspect_id,
       name: suspectMap[r.correct_suspect_id].name,
@@ -832,6 +832,16 @@ async function main() {
     <div class="objectives-card">
       <div class="obj-heading">🎯 Case Objectives &amp; Required Criteria:</div>
       ${formatObjectivesText(r.objectives)}
+    </div>`;
+      } else if (caseObjs.length > 0) {
+        html += `
+    <div class="objectives-card">
+      <div class="obj-heading">🎯 Case Objectives &amp; Required Criteria:</div>
+      <ul class="obj-list" style="margin: 4px 0 0 16px; padding: 0; font-size: 10px; color: #334155;">`;
+        caseObjs.forEach((o, idx) => {
+          html += `<li><strong>Step ${idx + 1}:</strong> ${escapeHtml(o.objective_text)} <span style="color:#059669; font-weight:700;">(+${o.points} XP)</span></li>`;
+        });
+        html += `</ul>
     </div>`;
       }
 
@@ -903,6 +913,7 @@ async function main() {
 </html>`;
 
   const tempHtmlPath = path.resolve(__dirname, 'temp_practice_answer_key_clean.html');
+  const tempPdfPath = path.resolve(__dirname, 'temp_practice_rendered.pdf');
   const targetPdfPath = path.resolve(__dirname, '../../PRACTICE_CASES_ANSWER_KEY.pdf');
   const outputMdPath = path.resolve(__dirname, '../../PRACTICE_CASES_ANSWER_KEY.md');
 
@@ -910,7 +921,7 @@ async function main() {
   console.log(`Clean HTML generated at: ${tempHtmlPath}`);
 
   const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-  const cmd = `"${edgePath}" --headless --disable-gpu --no-pdf-header-footer --run-all-compositor-stages-before-draw --print-to-pdf="${targetPdfPath}" "${tempHtmlPath}"`;
+  const cmd = `"${edgePath}" --headless --disable-gpu --no-pdf-header-footer --run-all-compositor-stages-before-draw --print-to-pdf="${tempPdfPath}" "${tempHtmlPath}"`;
   console.log('Rendering PDF via Microsoft Edge...');
   execSync(cmd);
 
@@ -918,8 +929,19 @@ async function main() {
     fs.unlinkSync(tempHtmlPath);
   }
 
-  const pdfStats = fs.statSync(targetPdfPath);
-  console.log(`✅ Practice PDF successfully generated: ${targetPdfPath} (${(pdfStats.size / 1024).toFixed(1)} KB)`);
+  let finalPdfPath = targetPdfPath;
+  try {
+    fs.copyFileSync(tempPdfPath, targetPdfPath);
+    fs.unlinkSync(tempPdfPath);
+    const pdfStats = fs.statSync(targetPdfPath);
+    console.log(`✅ Practice PDF successfully generated: ${targetPdfPath} (${(pdfStats.size / 1024).toFixed(1)} KB)`);
+  } catch (err) {
+    finalPdfPath = targetPdfPath.replace(/\.pdf$/, '_UPDATED.pdf');
+    fs.copyFileSync(tempPdfPath, finalPdfPath);
+    fs.unlinkSync(tempPdfPath);
+    const pdfStats = fs.statSync(finalPdfPath);
+    console.log(`⚠️ Original Practice PDF locked by another application. Successfully saved updated PDF to: ${finalPdfPath} (${(pdfStats.size / 1024).toFixed(1)} KB)`);
+  }
 
   // Write Markdown version for Practice Mode cases
   let md = `# 🧭 Detective Query — Practice Mode Master Answer Key
@@ -963,7 +985,7 @@ async function main() {
     }
 
     const caseObjs = caseObjectivesMap[r.case_id] || [];
-    const hasProgressiveObjs = caseObjs.length > 0;
+    const hasProgressiveObjs = r.sql_type === 'DQL' && caseObjs.length > 0 && caseObjs.some(obj => obj.expected_query && obj.expected_query.trim().length > 0);
     const suspectInfo = practiceDetectiveNotes[r.case_id] || (r.correct_suspect_id && suspectMap[r.correct_suspect_id] ? {
       suspect_id: r.correct_suspect_id,
       name: suspectMap[r.correct_suspect_id].name,
@@ -989,6 +1011,12 @@ async function main() {
         const lines = r.objectives.split('\n').map(l => l.trim()).filter(l => l.length > 0);
         lines.forEach((line, idx) => {
           md += `${idx + 1}. ${line.replace(/^\d+[\.\)]\s*/, '')}\n`;
+        });
+        md += `\n`;
+      } else if (caseObjs.length > 0) {
+        md += `#### 🎯 Case Objectives & Required Criteria:\n`;
+        caseObjs.forEach((obj, idx) => {
+          md += `${idx + 1}. **Step ${idx + 1}**: ${obj.objective_text} (\`+${obj.points} XP\`)\n`;
         });
         md += `\n`;
       }
