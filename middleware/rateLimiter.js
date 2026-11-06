@@ -12,7 +12,7 @@ const apiLimiter = rateLimit({
 // 🔐 Login limiter (Per IP + Email combination, only penalizes failed attempts)
 const loginLimiter = rateLimit({
     windowMs: 10 * 60 * 1000, // 10 minutes
-    max: 25,                  // 25 failed attempts allowance
+    max: 5,                   // 5 failed attempts allowance (Industry standard)
     skipSuccessfulRequests: true, // Successful logins are NEVER counted
     standardHeaders: true,
     legacyHeaders: false,
@@ -22,7 +22,7 @@ const loginLimiter = rateLimit({
         return `${ip}_${email}`;
     },
     validate: { keyGeneratorIpFallback: false },
-    message: { error: 'Too many failed login attempts. Please wait a few minutes and try again.' }
+    message: { error: 'Too many failed login attempts. Please wait 10 minutes and try again.' }
 });
 
 module.exports = {
