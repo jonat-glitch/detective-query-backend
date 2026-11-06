@@ -8,36 +8,47 @@ const fs = require('fs');
 
 // ── Idempotent migration: ensure pause & archive columns exist ────────────────
 async function addColumnIfNotExists(table, column, definition) {
-  try {
-    const [cols] = await systemDB.query(
-      `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-      [table, column]
-    );
-    if (cols.length === 0) {
-      await systemDB.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    try {
+        const [cols] = await systemDB.query(
+            `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+            [table, column]
+        );
+        if (cols.length === 0) {
+            await systemDB.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+        }
+    } catch (err) {
+        console.warn(`Migration notice (${table}.${column}):`, err.message);
     }
-  } catch (err) {
-    console.warn(`Migration notice (${table}.${column}):`, err.message);
-  }
 }
 
 (async () => {
-  try {
-    await addColumnIfNotExists('game_sessions', 'is_paused', 'TINYINT(1) NOT NULL DEFAULT 0');
-    await addColumnIfNotExists('game_sessions', 'paused_at', 'DATETIME NULL');
-    await addColumnIfNotExists('game_sessions', 'paused_seconds', 'INT NOT NULL DEFAULT 0');
-    await addColumnIfNotExists('rooms', 'is_archived', 'TINYINT(1) NOT NULL DEFAULT 0');
-    await addColumnIfNotExists('rooms', 'archived_at', 'DATETIME NULL');
-    await addColumnIfNotExists('rooms', 'sql_type', "ENUM('DDL','DML','DQL') NOT NULL DEFAULT 'DQL'");
-    await addColumnIfNotExists('cases', 'module_order', 'TINYINT NOT NULL DEFAULT 3');
+    try {
+        await addColumnIfNotExists('game_sessions', 'is_paused', 'TINYINT(1) NOT NULL DEFAULT 0');
+        await addColumnIfNotExists('game_sessions', 'paused_at', 'DATETIME NULL');
+        await addColumnIfNotExists('game_sessions', 'paused_seconds', 'INT NOT NULL DEFAULT 0');
+        await addColumnIfNotExists('rooms', 'is_archived', 'TINYINT(1) NOT NULL DEFAULT 0');
+        await addColumnIfNotExists('rooms', 'archived_at', 'DATETIME NULL');
+        await addColumnIfNotExists('rooms', 'sql_type', "ENUM('DDL','DML','DQL') NOT NULL DEFAULT 'DQL'");
+        await addColumnIfNotExists('cases', 'module_order', 'TINYINT NOT NULL DEFAULT 3');
 
-    // Back-fill existing cases based on sql_type
-    await systemDB.query(`UPDATE cases SET module_order = 1 WHERE sql_type = 'DDL' AND (module_order IS NULL OR module_order = 3)`);
-    await systemDB.query(`UPDATE cases SET module_order = 2 WHERE sql_type = 'DML' AND (module_order IS NULL OR module_order = 3)`);
-  } catch (e) {
-    console.warn('Initial room migration note:', e.message);
-  }
+        // Back-fill existing cases based on sql_type
+        await systemDB.query(`UPDATE cases SET module_order = 1 WHERE sql_type = 'DDL' AND (module_order IS NULL OR module_order = 3)`);
+        await systemDB.query(`UPDATE cases SET module_order = 2 WHERE sql_type = 'DML' AND (module_order IS NULL OR module_order = 3)`);
+    } catch (e) {
+        console.warn('Initial room migration note:', e.message);
+    }
 })();
+
+// ── In-Memory Proctoring / Anti-Cheat Room Registry ───────────────────────────
+const activeProctorIncidents = new Map(); // roomId -> Map(userId -> incidentRecord)
+
+function getOrCreateRoomProctorMap(roomId) {
+    const key = String(roomId);
+    if (!activeProctorIncidents.has(key)) {
+        activeProctorIncidents.set(key, new Map());
+    }
+    return activeProctorIncidents.get(key);
+}
 
 router.post('/create-room',
     authenticateToken,
@@ -259,34 +270,34 @@ router.post('/join-room',
 
             if (existing.length > 0) {
                 const status = existing[0].status;
-              
+
                 if (status === 'Approved') {
-                  return res.json({
-                    message: "Already approved",
-                    status: "Approved",
-                    room_id: room.room_id
-                  });
+                    return res.json({
+                        message: "Already approved",
+                        status: "Approved",
+                        room_id: room.room_id
+                    });
                 }
-              
+
                 if (status === 'Pending') {
-                  return res.status(403).json({
-                    error: "Waiting for teacher approval"
-                  });
+                    return res.status(403).json({
+                        error: "Waiting for teacher approval"
+                    });
                 }
 
                 if (status === 'Rejected') {
-                  // Allow student to re-request join
-                  await systemDB.query(
-                    `UPDATE room_students
+                    // Allow student to re-request join
+                    await systemDB.query(
+                        `UPDATE room_students
                      SET status = 'Pending', requested_at = CURRENT_TIMESTAMP
                      WHERE room_id = ? AND student_id = ?`,
-                    [room.room_id, studentId]
-                  );
-                  return res.json({
-                    message: "Join request re-sent",
-                    status: "Pending",
-                    room_id: room.room_id
-                  });
+                        [room.room_id, studentId]
+                    );
+                    return res.json({
+                        message: "Join request re-sent",
+                        status: "Pending",
+                        room_id: room.room_id
+                    });
                 }
             }
 
@@ -515,7 +526,7 @@ router.get('/teacher/summary-stats',
 );
 
 router.get('/available', authenticateToken, authorizeRole([1]), async (req, res) => {
-      try {
+    try {
         const studentId = req.user.user_id;
 
         // Auto-end expired sessions first (only if not paused)
@@ -580,11 +591,11 @@ router.get('/available', authenticateToken, authorizeRole([1]), async (req, res)
 
         res.json({ rooms });
 
-      } catch (error) {
+    } catch (error) {
         console.error(error);
         res.status(500).json({ error: "Failed to fetch rooms" });
-      }
     }
+}
 );
 
 
@@ -855,7 +866,7 @@ router.post('/activate',
                 `INSERT INTO game_sessions
                  (room_id, case_id, difficulty_id, start_time, end_time, status, personal_time_limit)
                  VALUES (?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL ? MINUTE), 'Active', ?)`,
-                 [room_id, case_id, difficulty_id, duration_minutes, personal_time_limit]
+                [room_id, case_id, difficulty_id, duration_minutes, personal_time_limit]
             );
 
             // 🔥 Reset playground when game starts
@@ -949,7 +960,7 @@ router.post('/pause/:room_id',
                 [room_id]
             );
 
-            res.json({ 
+            res.json({
                 message: 'Game paused',
                 end_time: pausedSessions[0]?.end_time || null,
                 remaining_seconds: Number(pausedSessions[0]?.remaining_seconds) || 0
@@ -1248,7 +1259,7 @@ router.get('/active/:room_id',
                 const pdfPath = path.join(uploadsDir, `study-material-${session.case_id}.pdf`);
                 hasMaterial = fs.existsSync(pdfPath);
                 if (hasMaterial) {
-                    try { materialVersion = Math.floor(fs.statSync(pdfPath).mtimeMs / 1000); } catch (e) {}
+                    try { materialVersion = Math.floor(fs.statSync(pdfPath).mtimeMs / 1000); } catch (e) { }
                 }
             }
             const study_material_url = hasMaterial
@@ -1379,7 +1390,20 @@ router.get('/leaderboard/:room_id',
                 [sessionId, sessionId, sessionId, sessionId, room_id]
             );
 
-            res.json(results);
+            // Attach proctor incident details and apply penalty deduction to total_score
+            const roomMap = getOrCreateRoomProctorMap(room_id);
+            const resultsWithProctor = results.map(r => {
+                const p = roomMap.get(r.user_id) || { strike_count: 0, penalty_points: 0, is_disqualified: false, last_violation: null };
+                const adjustedScore = Math.max(0, (r.total_score || 0) - (p.penalty_points || 0));
+                return {
+                    ...r,
+                    total_score: adjustedScore,
+                    raw_score: r.total_score,
+                    proctor: p
+                };
+            });
+
+            res.json(resultsWithProctor);
 
         } catch (error) {
             console.error("LEADERBOARD ERROR:", error);
@@ -1395,6 +1419,7 @@ router.post('/reset/:room_id',
     async (req, res) => {
         try {
             const { room_id } = req.params;
+            activeProctorIncidents.delete(String(room_id));
 
             // End any active game session for this room
             await systemDB.query(
@@ -1443,7 +1468,7 @@ router.get('/cases',
                 where += ' AND mode = ?';
                 params.push(targetMode);
             }
-            if (type && ['DQL','DML','DDL'].includes(type)) {
+            if (type && ['DQL', 'DML', 'DDL'].includes(type)) {
                 where += ' AND sql_type = ?';
                 params.push(type);
             }
@@ -1470,7 +1495,7 @@ router.get('/practice-cases',
     async (req, res) => {
         try {
             const { type } = req.query;
-            if (!type || !['DQL','DML','DDL'].includes(type)) {
+            if (!type || !['DQL', 'DML', 'DDL'].includes(type)) {
                 return res.status(400).json({ error: 'type must be DQL, DML, or DDL' });
             }
             const [cases] = await systemDB.query(
@@ -1498,11 +1523,11 @@ router.post('/create-case',
     async (req, res) => {
         try {
             const { title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
-                    dataset_id, correct_query, correct_suspect_id, module_order } = req.body;
+                dataset_id, correct_query, correct_suspect_id, module_order } = req.body;
             if (!title || !description || !difficulty_id || !sql_type) {
                 return res.status(400).json({ error: 'title, description, difficulty_id, sql_type are required' });
             }
-            if (!['DQL','DML','DDL'].includes(sql_type)) {
+            if (!['DQL', 'DML', 'DDL'].includes(sql_type)) {
                 return res.status(400).json({ error: 'sql_type must be DQL, DML, or DDL' });
             }
             // Auto-derive module_order if not provided
@@ -1515,7 +1540,7 @@ router.post('/create-case',
                                     dataset_id, correct_query, correct_suspect_id, module_order, is_active)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
                 [title, description, difficulty_id, sql_type, setup_sql || null, expected_result_sql || null,
-                 dataset_id || 1, correct_query || null, correct_suspect_id || null, resolvedModuleOrder]
+                    dataset_id || 1, correct_query || null, correct_suspect_id || null, resolvedModuleOrder]
             );
             res.json({ message: 'Case created', case_id: result.insertId });
         } catch (error) {
@@ -1533,7 +1558,7 @@ router.put('/cases/:case_id',
         try {
             const { case_id } = req.params;
             const { title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
-                    dataset_id, correct_query, correct_suspect_id, is_active, module_order } = req.body;
+                dataset_id, correct_query, correct_suspect_id, is_active, module_order } = req.body;
             await systemDB.query(
                 `UPDATE cases
                  SET title = COALESCE(?, title),
@@ -1549,10 +1574,10 @@ router.put('/cases/:case_id',
                      is_active = COALESCE(?, is_active)
                  WHERE case_id = ?`,
                 [title, description, difficulty_id, sql_type, setup_sql, expected_result_sql,
-                 dataset_id, correct_query,
-                 correct_suspect_id !== undefined ? correct_suspect_id : null,
-                 module_order !== undefined ? Number(module_order) : null,
-                 is_active, case_id]
+                    dataset_id, correct_query,
+                    correct_suspect_id !== undefined ? correct_suspect_id : null,
+                    module_order !== undefined ? Number(module_order) : null,
+                    is_active, case_id]
             );
             res.json({ message: 'Case updated' });
         } catch (error) {
@@ -1717,7 +1742,13 @@ router.get('/students/:room_id',
                 [room_id]
             );
 
-            res.json(students);
+            const roomMap = getOrCreateRoomProctorMap(room_id);
+            const studentsWithProctor = students.map(s => ({
+                ...s,
+                proctor: roomMap.get(s.user_id) || { strike_count: 0, penalty_points: 0, is_disqualified: false, last_violation: null }
+            }));
+
+            res.json(studentsWithProctor);
 
         } catch (error) {
             console.error(error);
@@ -1729,119 +1760,119 @@ router.get('/students/:room_id',
 router.get('/rank/suspects/:room_id',
     authenticateToken,
     async (req, res) => {
-      try {
-        const { room_id } = req.params;
-        const userId = req.user.user_id;
+        try {
+            const { room_id } = req.params;
+            const userId = req.user.user_id;
 
-        // 🔒 Check student is approved or teacher/admin
-        const [member] = await systemDB.query(
-          `SELECT 1 FROM room_students
+            // 🔒 Check student is approved or teacher/admin
+            const [member] = await systemDB.query(
+                `SELECT 1 FROM room_students
            WHERE room_id = ?
            AND student_id = ?
            AND status = 'Approved'`,
-          [room_id, userId]
-        );
+                [room_id, userId]
+            );
 
-        if (member.length === 0) {
-          const [roomOwner] = await systemDB.query(
-            `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
-            [room_id, userId]
-          );
-          if (roomOwner.length === 0 && req.user.role_id !== 3) {
-            return res.status(403).json({ error: "Access denied" });
-          }
-        }
+            if (member.length === 0) {
+                const [roomOwner] = await systemDB.query(
+                    `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                    [room_id, userId]
+                );
+                if (roomOwner.length === 0 && req.user.role_id !== 3) {
+                    return res.status(403).json({ error: "Access denied" });
+                }
+            }
 
-        // 🔥 Get active or latest game session + dataset
-        const [sessions] = await systemDB.query(
-          `SELECT gs.session_id, c.dataset_id
+            // 🔥 Get active or latest game session + dataset
+            const [sessions] = await systemDB.query(
+                `SELECT gs.session_id, c.dataset_id
            FROM game_sessions gs
            JOIN cases c ON gs.case_id = c.case_id
            WHERE gs.room_id = ?
            ORDER BY (gs.status = 'Active' OR LOWER(gs.status) = 'active') DESC, gs.session_id DESC
            LIMIT 1`,
-          [room_id]
-        );
+                [room_id]
+            );
 
-        if (sessions.length === 0) {
-          return res.status(404).json({ error: "No game session found" });
-        }
-
-        const session = sessions[0];
-   
-        // Reset playground to correct dataset
-        if (session.dataset_id) {
-          try {
-            await submissionService.resetPlayground(session.dataset_id);
-          } catch (err) {
-            console.warn("Playground reset warning:", err.message);
-          }
-        }
-  
-        // 👤 Fetch suspects with multiple schema fallbacks
-        let suspects = [];
-        const queries = [
-            `SELECT suspect_id AS person_id, name, age, status FROM suspects`,
-            `SELECT suspect_id AS person_id, name FROM suspects`,
-            `SELECT id AS person_id, name FROM suspects`,
-            `SELECT person_id, name, role FROM persons`,
-            `SELECT person_id, name FROM persons`,
-            `SELECT id AS person_id, name FROM persons`,
-            `SELECT id AS person_id, name FROM person`,
-            `SELECT person_id, name FROM person`
-        ];
-
-        for (const q of queries) {
-            try {
-                const [rows] = await playgroundDB.query(q);
-                if (rows && rows.length > 0) {
-                    suspects = rows;
-                    break;
-                }
-            } catch (e) {
-                // Ignore and try next query format
+            if (sessions.length === 0) {
+                return res.status(404).json({ error: "No game session found" });
             }
+
+            const session = sessions[0];
+
+            // Reset playground to correct dataset
+            if (session.dataset_id) {
+                try {
+                    await submissionService.resetPlayground(session.dataset_id);
+                } catch (err) {
+                    console.warn("Playground reset warning:", err.message);
+                }
+            }
+
+            // 👤 Fetch suspects with multiple schema fallbacks
+            let suspects = [];
+            const queries = [
+                `SELECT suspect_id AS person_id, name, age, status FROM suspects`,
+                `SELECT suspect_id AS person_id, name FROM suspects`,
+                `SELECT id AS person_id, name FROM suspects`,
+                `SELECT person_id, name, role FROM persons`,
+                `SELECT person_id, name FROM persons`,
+                `SELECT id AS person_id, name FROM persons`,
+                `SELECT id AS person_id, name FROM person`,
+                `SELECT person_id, name FROM person`
+            ];
+
+            for (const q of queries) {
+                try {
+                    const [rows] = await playgroundDB.query(q);
+                    if (rows && rows.length > 0) {
+                        suspects = rows;
+                        break;
+                    }
+                } catch (e) {
+                    // Ignore and try next query format
+                }
+            }
+
+            res.json({ suspects });
+
+        } catch (error) {
+            console.error("Failed to load suspects:", error);
+            res.json({ suspects: [] });
         }
-  
-        res.json({ suspects });
-  
-      } catch (error) {
-        console.error("Failed to load suspects:", error);
-        res.json({ suspects: [] });
-      }
     }
 );
 router.put("/:id",
     authenticateToken,
     authorizeRole([2]),
     async (req, res) => {
-    const { id } = req.params;
-    const { room_name, room_code } = req.body;
+        const { id } = req.params;
+        const { room_name, room_code } = req.body;
 
-    try {
-        const teacherId = req.user.user_id;
+        try {
+            const teacherId = req.user.user_id;
 
-        // Verify ownership
-        const [room] = await systemDB.query(
-            `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
-            [id, teacherId]
-        );
+            // Verify ownership
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [id, teacherId]
+            );
 
-        if (room.length === 0) {
-            return res.status(403).json({ error: "Not your room" });
+            if (room.length === 0) {
+                return res.status(403).json({ error: "Not your room" });
+            }
+
+            const [result] = await systemDB.query(
+                "UPDATE rooms SET room_name = ?, room_code = ? WHERE room_id = ?",
+                [room_name, room_code, id]
+            );
+
+            res.json({ success: true, result });
+        } catch (err) {
+            console.error(err);
+            res.status(500).json({ success: false });
         }
-
-        const [result] = await systemDB.query(
-            "UPDATE rooms SET room_name = ?, room_code = ? WHERE room_id = ?",
-            [room_name, room_code, id]
-        );
-
-        res.json({ success: true, result });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false });
-    }
-});
+    });
 
 router.get('/session-logs/:room_id',
     authenticateToken,
@@ -1903,7 +1934,7 @@ router.get('/session-logs/:room_id',
                 const totalAttempts = row.total_attempts || 0;
                 const bestTime = row.best_time_seconds !== null ? row.best_time_seconds : 'N/A';
                 const lastAttempt = row.last_attempt ? new Date(row.last_attempt).toLocaleString() : 'Never';
-                
+
                 csv += `${studentId},${fullName},${email},${totalScore},${correctAttempts},${totalAttempts},${bestTime},"${lastAttempt}"\n`;
             });
 
@@ -2067,7 +2098,7 @@ router.post('/:room_id/rank-run-dml', authenticateToken, authorizeRole([1]), asy
         if (sessionRows[0]?.setup_sql) {
             const stmts = sessionRows[0].setup_sql.split(';').map(s => s.trim()).filter(Boolean);
             for (const stmt of stmts) {
-                try { await conn.query(stmt); } catch {}
+                try { await conn.query(stmt); } catch { }
             }
         }
 
@@ -2260,4 +2291,75 @@ router.post('/:room_id/rank-submit-ddl', authenticateToken, authorizeRole([1]), 
     }
 });
 
-module.exports = router;
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIVE PROCTORING & ACADEMIC INTEGRITY ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// POST /rooms/:room_id/proctor-alert (Report student tab-switch or screenshot violation)
+router.post('/:room_id/proctor-alert', authenticateToken, authorizeRole([1]), async (req, res) => {
+    try {
+        const { room_id } = req.params;
+        const userId = req.user.user_id;
+        const studentName = req.user.full_name || 'Student';
+        const { incident_type, strike_count } = req.body;
+
+        const roomMap = getOrCreateRoomProctorMap(room_id);
+        const existing = roomMap.get(userId) || {
+            user_id: userId,
+            full_name: studentName,
+            strike_count: 0,
+            penalty_points: 0,
+            is_disqualified: false,
+            incidents: []
+        };
+
+        const newStrikeCount = Math.max(existing.strike_count + 1, Number(strike_count) || 1);
+        const penaltyPoints = newStrikeCount >= 2 ? 10 : 0;
+        const isDisqualified = newStrikeCount >= 3;
+
+        const record = {
+            user_id: userId,
+            full_name: studentName,
+            strike_count: newStrikeCount,
+            last_violation: incident_type || 'TAB_SWITCH',
+            last_violation_at: new Date().toISOString(),
+            penalty_points: penaltyPoints,
+            is_disqualified: isDisqualified,
+            incidents: [
+                ...existing.incidents,
+                {
+                    type: incident_type || 'TAB_SWITCH',
+                    time: new Date().toISOString(),
+                    strike: newStrikeCount
+                }
+            ]
+        };
+
+        roomMap.set(userId, record);
+
+        res.json({
+            success: true,
+            strike_count: newStrikeCount,
+            penalty_points: penaltyPoints,
+            is_disqualified: isDisqualified
+        });
+    } catch (e) {
+        console.error('proctor-alert error:', e);
+        res.status(500).json({ error: 'Failed to record proctor alert' });
+    }
+});
+
+// GET /rooms/:room_id/proctor-incidents (Teacher live monitoring)
+router.get('/:room_id/proctor-incidents', authenticateToken, async (req, res) => {
+    try {
+        const { room_id } = req.params;
+        const roomMap = getOrCreateRoomProctorMap(room_id);
+        const incidents = Array.from(roomMap.values());
+        res.json({ room_id, incidents });
+    } catch (e) {
+        console.error('proctor-incidents error:', e);
+        res.status(500).json({ error: 'Failed to fetch proctor incidents' });
+    }
+});
+
+module.exports = router;
