@@ -2445,7 +2445,8 @@ router.post('/:room_id/proctor-alert', authenticateToken, authorizeRole([1]), as
         };
 
         const newStrikeCount = Math.max(existing.strike_count + 1, Number(strike_count) || 1);
-        const penaltyPoints = newStrikeCount >= 2 ? 10 : 0;
+        // Cumulative penalty: Strike 2 = -10 XP, Strike 3 (disqualified) = -20 XP total
+        const penaltyPoints = newStrikeCount >= 3 ? 20 : newStrikeCount >= 2 ? 10 : 0;
         const isDisqualified = newStrikeCount >= 3;
 
         const record = {
@@ -2481,7 +2482,7 @@ router.post('/:room_id/proctor-alert', authenticateToken, authorizeRole([1]), as
 });
 
 // GET /rooms/:room_id/proctor-incidents (Teacher live monitoring)
-router.get('/:room_id/proctor-incidents', authenticateToken, async (req, res) => {
+router.get('/:room_id/proctor-incidents', authenticateToken, authorizeRole([2]), async (req, res) => {
     try {
         const { room_id } = req.params;
         const roomMap = getOrCreateRoomProctorMap(room_id);
