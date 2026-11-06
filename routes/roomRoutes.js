@@ -1880,6 +1880,49 @@ router.put("/:id",
         }
     });
 
+// ─── GET SESSIONS LIST (teacher use) ──────────────────────────────────────────
+router.get('/:room_id/sessions',
+    authenticateToken,
+    authorizeRole([2]),
+    async (req, res) => {
+        try {
+            const { room_id } = req.params;
+            const teacherId = req.user.user_id;
+
+            const [room] = await systemDB.query(
+                `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+                [room_id, teacherId]
+            );
+            if (room.length === 0) return res.status(403).json({ error: "Not your room" });
+
+            const [sessions] = await systemDB.query(
+                `SELECT 
+                    gs.session_id,
+                    gs.case_id,
+                    c.title AS case_title,
+                    c.sql_type,
+                    gs.status,
+                    gs.start_time,
+                    gs.end_time,
+                    gs.personal_time_limit,
+                    COUNT(DISTINCT a.user_id) AS student_count
+                 FROM game_sessions gs
+                 LEFT JOIN cases c ON gs.case_id = c.case_id
+                 LEFT JOIN attempts a ON a.session_id = gs.session_id AND a.mode = 'Rank'
+                 WHERE gs.room_id = ?
+                 GROUP BY gs.session_id, gs.case_id, c.title, c.sql_type, gs.status, gs.start_time, gs.end_time, gs.personal_time_limit
+                 ORDER BY gs.session_id DESC`,
+                [room_id]
+            );
+
+            res.json(sessions);
+        } catch (error) {
+            console.error("Fetch sessions error:", error);
+            res.status(500).json({ error: "Failed to fetch sessions" });
+        }
+    }
+);
+
 router.get('/session-logs/:room_id',
     authenticateToken,
     authorizeRole([2]),
@@ -1887,6 +1930,7 @@ router.get('/session-logs/:room_id',
         try {
             const { room_id } = req.params;
             const teacherId = req.user.user_id;
+            const requestedSessionId = req.query.session_id;
 
             // 🔒 Verify ownership
             const [room] = await systemDB.query(
@@ -1899,38 +1943,118 @@ router.get('/session-logs/:room_id',
                 return res.status(403).json({ error: "Not your room" });
             }
 
-            // Query ALL rank attempts for this room (no active session required)
-            // This lets teachers export logs at any time, not just during live games
+            // Determine target session if requested
+            let targetSessionId = null;
+            let targetSession = null;
 
-            const [results] = await systemDB.query(
-                `SELECT 
-                    u.student_id,
-                    u.full_name,
-                    u.email,
-                    COALESCE(SUM(a.score_awarded), 0) AS total_score,
-                    COUNT(CASE WHEN a.is_correct = 1 THEN 1 END) AS correct_attempts,
-                    COUNT(a.attempt_id) AS total_attempts,
-                    MIN(a.time_taken) AS best_time_seconds,
-                    MAX(a.attempt_date) AS last_attempt
-                 FROM room_students rs
-                 JOIN users u ON rs.student_id = u.user_id
-                 LEFT JOIN attempts a 
-                    ON a.user_id = u.user_id 
-                    AND a.room_id = ?
-                    AND a.mode = 'Rank'
-                 WHERE rs.room_id = ? 
-                 AND rs.status = 'Approved'
-                 GROUP BY u.user_id, u.student_id, u.full_name, u.email
-                 ORDER BY total_score DESC, best_time_seconds ASC`,
-                [room_id, room_id]
-            );
+            if (requestedSessionId && requestedSessionId !== 'all') {
+                if (requestedSessionId === 'latest') {
+                    const [latest] = await systemDB.query(
+                        `SELECT gs.session_id, gs.case_id, c.title AS case_title, gs.start_time
+                         FROM game_sessions gs
+                         LEFT JOIN cases c ON gs.case_id = c.case_id
+                         WHERE gs.room_id = ?
+                         ORDER BY gs.session_id DESC LIMIT 1`,
+                        [room_id]
+                    );
+                    if (latest.length > 0) {
+                        targetSession = latest[0];
+                        targetSessionId = targetSession.session_id;
+                    }
+                } else {
+                    const [found] = await systemDB.query(
+                        `SELECT gs.session_id, gs.case_id, c.title AS case_title, gs.start_time
+                         FROM game_sessions gs
+                         LEFT JOIN cases c ON gs.case_id = c.case_id
+                         WHERE gs.room_id = ? AND gs.session_id = ? LIMIT 1`,
+                        [room_id, requestedSessionId]
+                    );
+                    if (found.length > 0) {
+                        targetSession = found[0];
+                        targetSessionId = targetSession.session_id;
+                    }
+                }
+            }
+
+            let results = [];
+
+            if (targetSessionId) {
+                // Query strictly for this specific session
+                const [sessionResults] = await systemDB.query(
+                    `SELECT 
+                        u.student_id,
+                        u.full_name,
+                        u.email,
+                        CAST(COALESCE(fa.score_awarded, GREATEST(COALESCE(so.total_objective_points, 0), COALESCE(att.max_attempt_score, 0)), 0) AS SIGNED) AS total_score,
+                        COUNT(CASE WHEN a.is_correct = 1 AND a.sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN 1 END) AS correct_attempts,
+                        COUNT(CASE WHEN a.sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN a.attempt_id END) AS total_attempts,
+                        MIN(CASE WHEN a.sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN a.time_taken END) AS best_time_seconds,
+                        MAX(a.attempt_date) AS last_attempt
+                     FROM room_students rs
+                     JOIN users u ON rs.student_id = u.user_id
+                     LEFT JOIN (
+                         SELECT user_id, SUM(points_awarded) AS total_objective_points
+                         FROM session_objectives
+                         WHERE session_id = ? AND is_completed = 1
+                         GROUP BY user_id
+                     ) so ON so.user_id = u.user_id
+                     LEFT JOIN (
+                         SELECT user_id, MAX(CASE WHEN sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN score_awarded ELSE 0 END) AS max_attempt_score
+                         FROM attempts
+                         WHERE session_id = ?
+                         GROUP BY user_id
+                     ) att ON att.user_id = u.user_id
+                     LEFT JOIN (
+                         SELECT a1.user_id, a1.score_awarded
+                         FROM attempts a1
+                         WHERE a1.session_id = ? AND a1.final_answer IS NOT NULL
+                     ) fa ON fa.user_id = u.user_id
+                     LEFT JOIN attempts a 
+                        ON a.user_id = u.user_id 
+                        AND a.session_id = ?
+                        AND a.mode = 'Rank'
+                     WHERE rs.room_id = ? 
+                     AND rs.status = 'Approved'
+                     GROUP BY u.user_id, u.student_id, u.full_name, u.email, fa.score_awarded, so.total_objective_points, att.max_attempt_score
+                     ORDER BY total_score DESC, best_time_seconds ASC`,
+                    [targetSessionId, targetSessionId, targetSessionId, targetSessionId, room_id]
+                );
+                results = sessionResults;
+            } else {
+                // All-Time Combined
+                const [allResults] = await systemDB.query(
+                    `SELECT 
+                        u.student_id,
+                        u.full_name,
+                        u.email,
+                        COALESCE(SUM(a.score_awarded), 0) AS total_score,
+                        COUNT(CASE WHEN a.is_correct = 1 AND a.sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN 1 END) AS correct_attempts,
+                        COUNT(CASE WHEN a.sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN a.attempt_id END) AS total_attempts,
+                        MIN(CASE WHEN a.sql_query NOT IN ('START_SESSION', 'TIME_EXPIRED') THEN a.time_taken END) AS best_time_seconds,
+                        MAX(a.attempt_date) AS last_attempt
+                     FROM room_students rs
+                     JOIN users u ON rs.student_id = u.user_id
+                     LEFT JOIN attempts a 
+                        ON a.user_id = u.user_id 
+                        AND a.room_id = ?
+                        AND a.mode = 'Rank'
+                     WHERE rs.room_id = ? 
+                     AND rs.status = 'Approved'
+                     GROUP BY u.user_id, u.student_id, u.full_name, u.email
+                     ORDER BY total_score DESC, best_time_seconds ASC`,
+                    [room_id, room_id]
+                );
+                results = allResults;
+            }
 
             if (req.query.format === 'json') {
                 return res.json(results);
             }
 
             // Construct CSV
-            let csv = 'Student ID,Full Name,Email,Total Score,Correct Attempts,Total Attempts,Best Time (Seconds),Last Attempt\n';
+            let sessionHeader = targetSession ? `Session #${targetSession.session_id} - ${targetSession.case_title || 'Case'} (${new Date(targetSession.start_time).toLocaleDateString()})` : 'All Sessions Combined';
+            let csv = `Report: Session Logs - ${room[0].room_name} (${sessionHeader})\n`;
+            csv += 'Student ID,Full Name,Email,Total Score,Correct Attempts,Total Attempts,Best Time (Seconds),Last Attempt\n';
             results.forEach(row => {
                 const studentId = row.student_id || 'N/A';
                 const fullName = `"${(row.full_name || '').replace(/"/g, '""')}"`;
@@ -1945,8 +2069,9 @@ router.get('/session-logs/:room_id',
             });
 
             const safeRoomName = (room[0].room_name || `Room_${room_id}`).replace(/[^a-z0-9_]/gi, '_');
+            const sessionTag = targetSession ? `_Session${targetSession.session_id}` : '_AllSessions';
             const date = new Date().toISOString().slice(0, 10);
-            const filename = `Session_Logs_${safeRoomName}_${date}.csv`;
+            const filename = `Session_Logs_${safeRoomName}${sessionTag}_${date}.csv`;
             res.setHeader('Content-Type', 'text/csv');
             res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
             return res.status(200).send(csv);
