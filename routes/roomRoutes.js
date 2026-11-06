@@ -41,7 +41,7 @@ async function addColumnIfNotExists(table, column, definition) {
 
 // ── In-Memory Proctoring / Anti-Cheat Room Registry ───────────────────────────
 // Shared via utils/proctorState so submissionRoutes can also check disqualification
-const { activeProctorIncidents, getOrCreateRoomProctorMap } = require('../utils/proctorState');
+const { activeProctorIncidents, getOrCreateRoomProctorMap, persistProctorRecord, clearPersistedRoom, clearPersistedStudent } = require('../utils/proctorState');
 
 router.post('/create-room',
     authenticateToken,
@@ -849,6 +849,7 @@ router.post('/activate',
 
             // Reset proctor strikes for all students in the room for the new game session
             activeProctorIncidents.delete(String(room_id));
+            clearPersistedRoom(room_id); // C2: also clear from DB
 
             await systemDB.query(
                 `UPDATE game_sessions
@@ -914,6 +915,7 @@ router.post('/end-game/:room_id',
 
             // Clear proctor incidents when session ends
             activeProctorIncidents.delete(String(room_id));
+            clearPersistedRoom(room_id); // C2: also clear from DB
 
             // End all active sessions for this room
             await systemDB.query(
@@ -1419,6 +1421,7 @@ router.post('/reset/:room_id',
         try {
             const { room_id } = req.params;
             activeProctorIncidents.delete(String(room_id));
+            clearPersistedRoom(room_id); // C2: also clear from DB
 
             // End any active game session for this room
             await systemDB.query(
@@ -2461,6 +2464,7 @@ router.post('/:room_id/proctor-alert', authenticateToken, authorizeRole([1]), as
         };
 
         roomMap.set(userId, record);
+        persistProctorRecord(room_id, record); // C2: persist to DB (fire-and-forget)
 
         res.json({
             success: true,
@@ -2505,8 +2509,10 @@ router.post('/:room_id/proctor-reset', authenticateToken, authorizeRole([2]), as
         if (student_id) {
             const roomMap = getOrCreateRoomProctorMap(room_id);
             roomMap.delete(Number(student_id));
+            clearPersistedStudent(room_id, student_id); // C2: also remove from DB
         } else {
             activeProctorIncidents.delete(String(room_id));
+            clearPersistedRoom(room_id); // C2: also clear from DB
         }
 
         res.json({ success: true, message: 'Academic integrity records reset successfully' });

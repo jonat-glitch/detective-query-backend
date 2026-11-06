@@ -585,7 +585,7 @@ router.post('/submit-rank', authenticateToken, async (req, res) => {
         }
 
         // 🚫 Disqualification guard — block disqualified students from submitting
-        const proctorRecord = getStudentProctorRecord(room_id, userId);
+        const proctorRecord = await getStudentProctorRecord(room_id, userId);
         if (proctorRecord?.is_disqualified) {
             return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations. Contact your instructor to appeal." });
         }
@@ -1059,7 +1059,7 @@ router.post('/rank/preview-query', authenticateToken, async (req, res) => {
         }
 
         // 🚫 Disqualification guard
-        const proctorRunRecord = getStudentProctorRecord(room_id, userId);
+        const proctorRunRecord = await getStudentProctorRecord(room_id, userId);
         if (proctorRunRecord?.is_disqualified) {
             return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations." });
         }
@@ -1154,7 +1154,7 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
         }
 
         // 🚫 Disqualification guard
-        const proctorRunRecord = getStudentProctorRecord(room_id, userId);
+        const proctorRunRecord = await getStudentProctorRecord(room_id, userId);
         if (proctorRunRecord?.is_disqualified) {
             return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations." });
         }
@@ -1587,7 +1587,7 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
         }
 
         // 🚫 Disqualification guard — block disqualified students from final submission
-        const proctorFinalRecord = getStudentProctorRecord(room_id, userId);
+        const proctorFinalRecord = await getStudentProctorRecord(room_id, userId);
         if (proctorFinalRecord?.is_disqualified) {
             return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations." });
         }
