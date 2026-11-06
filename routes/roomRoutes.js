@@ -40,15 +40,8 @@ async function addColumnIfNotExists(table, column, definition) {
 })();
 
 // ── In-Memory Proctoring / Anti-Cheat Room Registry ───────────────────────────
-const activeProctorIncidents = new Map(); // roomId -> Map(userId -> incidentRecord)
-
-function getOrCreateRoomProctorMap(roomId) {
-    const key = String(roomId);
-    if (!activeProctorIncidents.has(key)) {
-        activeProctorIncidents.set(key, new Map());
-    }
-    return activeProctorIncidents.get(key);
-}
+// Shared via utils/proctorState so submissionRoutes can also check disqualification
+const { activeProctorIncidents, getOrCreateRoomProctorMap } = require('../utils/proctorState');
 
 router.post('/create-room',
     authenticateToken,

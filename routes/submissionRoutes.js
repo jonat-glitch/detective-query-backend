@@ -3,6 +3,7 @@ const { systemDB, playgroundDB } = require('../db');
 const submissionService = require('../services/submissionService');
 const { authenticateToken } = require('../middleware/auth');
 const { evaluateSqlResult } = require('../utils/queryEvaluator');
+const { getStudentProctorRecord } = require('../utils/proctorState');
 
 const router = express.Router();
 
@@ -583,6 +584,12 @@ router.post('/submit-rank', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Not approved in this room" });
         }
 
+        // 🚫 Disqualification guard — block disqualified students from submitting
+        const proctorRecord = getStudentProctorRecord(room_id, userId);
+        if (proctorRecord?.is_disqualified) {
+            return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations. Contact your instructor to appeal." });
+        }
+
         // ⏳ Enforce session time using pause-aware check
         const timeCheck = await enforceSessionTime(session, userId, room_id);
         if (!timeCheck.allowed) {
@@ -1051,6 +1058,12 @@ router.post('/rank/preview-query', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: "No active game" });
         }
 
+        // 🚫 Disqualification guard
+        const proctorRunRecord = getStudentProctorRecord(room_id, userId);
+        if (proctorRunRecord?.is_disqualified) {
+            return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations." });
+        }
+
         const session = sessions[0];
 
         const validationError = validateStudentQuery(sql_query, session.sql_type || 'DQL');
@@ -1138,6 +1151,12 @@ router.post('/rank/run-query', authenticateToken, async (req, res) => {
 
         if (sessions.length === 0) {
             return res.status(400).json({ error: "No active game" });
+        }
+
+        // 🚫 Disqualification guard
+        const proctorRunRecord = getStudentProctorRecord(room_id, userId);
+        if (proctorRunRecord?.is_disqualified) {
+            return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations." });
         }
 
         const session = sessions[0];
@@ -1565,6 +1584,12 @@ router.post('/rank/submit-final', authenticateToken, async (req, res) => {
 
         if (isDql && !suspect_id && session.correct_suspect_id !== null) {
             return res.status(400).json({ error: "Suspect ID required." });
+        }
+
+        // 🚫 Disqualification guard — block disqualified students from final submission
+        const proctorFinalRecord = getStudentProctorRecord(room_id, userId);
+        if (proctorFinalRecord?.is_disqualified) {
+            return res.status(403).json({ error: "Your session has been disqualified due to academic integrity violations." });
         }
 
         // 2️⃣ Prevent double final submission (idempotent: return recorded score)
