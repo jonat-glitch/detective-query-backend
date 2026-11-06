@@ -854,6 +854,9 @@ router.post('/activate',
                 return res.status(403).json({ error: "Not your room" });
             }
 
+            // Reset proctor strikes for all students in the room for the new game session
+            activeProctorIncidents.delete(String(room_id));
+
             await systemDB.query(
                 `UPDATE game_sessions
                  SET status = 'Ended'
@@ -915,6 +918,9 @@ router.post('/end-game/:room_id',
             if (room.length === 0) {
                 return res.status(403).json({ error: "Not your room" });
             }
+
+            // Clear proctor incidents when session ends
+            activeProctorIncidents.delete(String(room_id));
 
             // End all active sessions for this room
             await systemDB.query(
@@ -2359,6 +2365,35 @@ router.get('/:room_id/proctor-incidents', authenticateToken, async (req, res) =>
     } catch (e) {
         console.error('proctor-incidents error:', e);
         res.status(500).json({ error: 'Failed to fetch proctor incidents' });
+    }
+});
+
+// POST /rooms/:room_id/proctor-reset (Teacher resets all or a specific student's proctor strikes)
+router.post('/:room_id/proctor-reset', authenticateToken, authorizeRole([2]), async (req, res) => {
+    try {
+        const { room_id } = req.params;
+        const { student_id } = req.body || {};
+        const teacherId = req.user.user_id;
+
+        const [room] = await systemDB.query(
+            `SELECT 1 FROM rooms WHERE room_id = ? AND teacher_id = ?`,
+            [room_id, teacherId]
+        );
+        if (room.length === 0) {
+            return res.status(403).json({ error: "Not your room" });
+        }
+
+        if (student_id) {
+            const roomMap = getOrCreateRoomProctorMap(room_id);
+            roomMap.delete(Number(student_id));
+        } else {
+            activeProctorIncidents.delete(String(room_id));
+        }
+
+        res.json({ success: true, message: 'Academic integrity records reset successfully' });
+    } catch (e) {
+        console.error('proctor-reset error:', e);
+        res.status(500).json({ error: 'Failed to reset proctor records' });
     }
 });
 
