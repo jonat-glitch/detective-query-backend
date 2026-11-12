@@ -1,0 +1,119 @@
+﻿[dotenv@17.3.1] injecting env (16) from .env -- tip: ΓÜÖ∩╕Å  enable debug logging with { debug: true }
+≡ƒûÑ∩╕Å System DB Connected (Cloud / Remote Config)
+≡ƒûÑ∩╕Å Playground DB Connected (Cloud / Remote Config)
+{
+  "users": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "roles": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "cases": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "case_objectives": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "rooms": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "room_students": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "game_sessions": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "attempts": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "user_case_progress": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "session_objectives": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "notifications": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "refresh_tokens": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "semesters": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "courses": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "sections": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "class_codes": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "student_enrollments": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "teacher_section_assignments": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "allowed_student_numbers": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "datasets": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "difficulty": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "case_study_materials": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "case_notes": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "achievements": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "user_achievements": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "user_badges": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "user_avatars": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "user_streaks": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "account_change_requests": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "registration_requests": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "student_invitations": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "otp_verifications": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "__foreign_keys__": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "playground__suspects": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "playground__evidence": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "playground__locations": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "playground__officers": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  },
+  "playground__witnesses": {
+    "error": "getaddrinfo ENOTFOUND gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
+  }
+}

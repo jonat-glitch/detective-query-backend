@@ -63,6 +63,9 @@ async function backupAndSyncDatabase(dbName) {
   let localAvailable = false;
   try {
     localConn = await mysql.createConnection(localConfig);
+    // Increase packet size on local connection
+    try { await localConn.query('SET GLOBAL max_allowed_packet = 67108864'); } catch (e) {}
+    try { await localConn.query('SET max_allowed_packet = 67108864'); } catch (e) {}
     await localConn.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
     await localConn.changeUser({ database: dbName });
     await localConn.query(`SET FOREIGN_KEY_CHECKS = 0;`);
@@ -75,6 +78,24 @@ async function backupAndSyncDatabase(dbName) {
   try {
     const [tables] = await cloudConn.query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"');
     const tableKey = `Tables_in_${dbName}`;
+    const cloudTableNames = tables.map(r => r[tableKey]);
+
+    // In local MySQL, drop any obsolete tables that no longer exist in cloud
+    if (localAvailable) {
+      try {
+        const [localTables] = await localConn.query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"');
+        const localTableKey = `Tables_in_${dbName}`;
+        for (const lt of localTables) {
+          const lTableName = lt[localTableKey];
+          if (!cloudTableNames.includes(lTableName)) {
+            console.log(`  🗑️ Dropping obsolete local table: ${lTableName}`);
+            await localConn.query(`DROP TABLE IF EXISTS \`${lTableName}\``);
+          }
+        }
+      } catch (dropErr) {
+        console.warn('  ⚠️ Note cleaning obsolete tables:', dropErr.message);
+      }
+    }
 
     for (const tableRow of tables) {
       const tableName = tableRow[tableKey];
@@ -135,8 +156,17 @@ async function backupAndSyncDatabase(dbName) {
             try {
               await localConn.query(insertSql);
             } catch (insertErr) {
-              if (insertErr.code === 'ER_NET_PACKET_TOO_LARGE') {
+              if (insertErr.code === 'ER_NET_PACKET_TOO_LARGE' || insertErr.message.includes('packet')) {
                 console.warn(`\n     ⚠️ Row packet too large for local MySQL buffer; skipping local cache for this row.`);
+                // MySQL terminates connection on packet too large; reconnect localConn
+                try {
+                  localConn = await mysql.createConnection(localConfig);
+                  await localConn.query(`USE \`${dbName}\``);
+                  await localConn.query(`SET FOREIGN_KEY_CHECKS = 0;`);
+                } catch (reconnErr) {
+                  console.warn('     ⚠️ Reconnect failed:', reconnErr.message);
+                  localAvailable = false;
+                }
               } else {
                 throw insertErr;
               }
